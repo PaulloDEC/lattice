@@ -3,6 +3,10 @@
 #include "vga.h"
 
 SpriteState g_spr;
+int g_rec_tag;
+void (*g_rec_blit)(int mode, int clip, int sheet, int wrap, int x, int y, int anim, int frame);
+void (*g_rec_pixel)(int x, int y, int color, int tag);
+void (*g_rec_rect)(int x0, int y0, int x1, int y1);
 
 #define I16(v) ((int16_t)(v))
 
@@ -80,6 +84,7 @@ int sprite_load_sheets(const uint8_t *entry, uint32_t size, const int16_t ids[SP
 static void blit(int mode, int clip, int sheet, int wrap, int x, int y, int anim, int frame)
 {
     int16_t a0 = I16(sheet), a1 = I16(wrap), a2 = I16(x), a3 = I16(y), a4 = I16(anim), a5 = I16(frame);
+    if (g_rec_blit) g_rec_blit(mode, clip, a0, a1, a2, a3, a4, a5);
     uint16_t idx = (uint16_t)(a0 * 110 + a4 * 20 + a5);      /* word index into the frame table */
     if (a0 < 0 || a0 >= SPR_SHEETS || idx + 40u >= SPR_TAB_WORDS) return;  /* original: no check */
     const uint8_t *s = g_spr.stream[a0];

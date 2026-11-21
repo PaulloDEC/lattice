@@ -29,6 +29,12 @@ typedef struct LoopHooks {
     void (*palette_entry)(int entry, int slot);  /* 05D8:0AFF without applying (used after the fade-out) */
     void (*release)(uint32_t clock);       /* 0:3846  free level memory */
     int  (*frame)(int n);                  /* top of every frame (original 0BA5:4D47); a non-zero result aborts level_run with -2 (tests, window close) */
+    /* Enhanced display smoothing (port only, NULL = nothing): */
+    void (*level_start)(void);             /* after every level setup (new level, restart, load) */
+    void (*tick_begin)(void);              /* the frame's drawing starts (camera updated, before the world draw) */
+    void (*tick_nosmooth)(void);           /* this frame must be shown as drawn (pause screen drawn into it) */
+    void (*tick_shown)(void);              /* the finished frame was just shown; the tick wait follows */
+    void (*tick_waited)(void);             /* the tick wait is over; the next frame's logic runs */
 } LoopHooks;
 extern LoopHooks g_loop_hooks;
 
@@ -43,5 +49,6 @@ void loop_install_defaults(void);
 
 /* Runs one level: mode 0 normal, 1 record a demo, 2 play a demo; pause != 0 shows the "press a key" screen before the
  * first frame.  Returns the original's result: 1 level finished, 0 died, -1 quit. */
+void level_tick_ahead(void);   /* run-ahead: one silent tick (see loop.c); level_run must be active */
 int level_run(int mode, int pause);
 #endif

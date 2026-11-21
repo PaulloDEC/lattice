@@ -66,10 +66,20 @@ void timer_set_clock(uint32_t v)
     base = v;
 }
 
+static int steady;
+void timer_set_steady(int on) { steady = on; }
+uint32_t timer_last(void) { return last; }
+double timer_clock_frac(void)
+{
+    uint64_t dt = now_fn() - t0_ns;
+    return (double)base + (double)dt * TIMER_HZ / 1e9;
+}
+
 void timer_frame_wait(int speed)
 {
     int32_t interval = g_speed_interval[(speed >= 0 && speed <= 2) ? speed : 0];
     while ((int32_t)(timer_clock() - last) < interval)   /* signed 32-bit, as the original */
         idle_fn();
-    last = timer_clock();
+    if (steady && (int32_t)(timer_clock() - last) < 2 * interval) last += (uint32_t)interval;
+    else last = timer_clock();
 }

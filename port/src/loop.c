@@ -41,13 +41,42 @@ void loop_install_defaults(void) { fx_set_draw_callback(cb_draw); fx_set_solid_c
 static void settings_changed(void) { if (HK(save_settings)) HK(save_settings)(); }
 static void say(const char *t) { if (HK(message)) HK(message)(t); }
 
+static int s_run_mode;
+
+/* Run-ahead (Enhanced display smoothing, port only): one tick's game logic and drawing exactly as level_run's
+ * frame body does it, but without the joystick poll, the pause picture, menus, hot keys and exit handling.
+ * The caller saves the whole state first, makes the platform callbacks silent and restores everything after;
+ * the drawing is recorded through the tick_begin hook and g_rec_* (sprite.h). */
+void level_tick_ahead(void)
+{
+    int mode = s_run_mode;
+    camera_update();
+    video_set_latch_mode(1); video_set_map_mask(0xF);
+    if (!g_lv.teleport) level_player_tiles();
+    if (HK(tick_begin)) HK(tick_begin)();
+    if (g_lv.flash) level_flash(); else draw_world();
+    hud_draw();
+    level_end_states();
+    player_draw();
+    enemy_shots_collide(); player_hit_by_projectiles(); player_hit_by_enemies(); enemy_spawn_pending();
+    projectiles_update(); enemies_update(); enemy_despawn_offscreen();
+    fx_update_bursts(); fx_update_scores(); fx_update_puffs(); fx_update_sparkles();
+    if (g_frame.anim_toggle) map_animate();
+    g_frame.anim_toggle = !g_frame.anim_toggle;
+    frame_controls(mode);
+    shots_update();
+    player_move(mode);
+}
+
 int level_run(int mode, int pause)
 {
+    s_run_mode = mode;
     int ret = 0;                       /* bp-8 */
     int frame_no = 0;
     g_frame.local_c = 0;               /* bp-0xC (set once, not by a restart) */
     for (;;) {                         /* 4549: restart point */
         if (level_setup(mode)) return -1;
+        if (HK(level_start)) HK(level_start)();
         g_fx.sprite_b = (int16_t)g_spr.hdr[1][13];    /* DS:C296 / C44E are words of the sprite headers (slots 1 and 3, word 13) */
         g_fx.sprite_c = (int16_t)g_spr.hdr[3][13];
         int exit_code = 0;             /* bp-0xB */
@@ -55,16 +84,20 @@ int level_run(int mode, int pause)
             if (HK(frame) && HK(frame)(frame_no++)) return -2;
             video_set_draw_page(video_draw_page() == 0);
             video_show_page_now(video_visible_page() == 0);
+            if (HK(tick_shown)) HK(tick_shown)();
             timer_frame_wait(g_game_speed);
+            if (HK(tick_waited)) HK(tick_waited)();
             if (g_joy_enabled && !g_demo_playback && HK(poll_joystick)) HK(poll_joystick)();
             camera_update();
             video_set_latch_mode(1); video_set_map_mask(0xF);
             if (!g_lv.teleport) level_player_tiles();
+            if (HK(tick_begin)) HK(tick_begin)();
             if (g_lv.flash) level_flash(); else draw_world();
             hud_draw();
             level_end_states();
             player_draw();
             if (pause) {
+                if (HK(tick_nosmooth)) HK(tick_nosmooth)();
                 if (HK(input_off)) HK(input_off)();
                 if (g_level_hooks.img) g_level_hooks.img(16, 12, 46);
                 else { uint32_t n; uint8_t *p = dat_load(16, &n); if (p) { video_load_img(p, n, 12, 46); free(p); } }

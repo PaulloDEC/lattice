@@ -9,6 +9,7 @@ static const uint8_t *s_font;
 static const int16_t k_grad[10] = { 192, 200, 208, 216, 224, 232, 112, 104, 208, 0 };    /* DS:1AE6 */
 
 void ui_set_font(const uint8_t font[720]) { s_font = font; }
+const uint8_t *ui_font(void) { return s_font; }
 
 static int glyph_maxbit(int g)
 {

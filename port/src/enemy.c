@@ -185,6 +185,7 @@ void enemy_draw_bar(int slot)
         long double v = ((long double)hp / (long double)hpmax) * 78.0L;
         if (v > -9.0e18L && v < 9.0e18L) len = (int16_t)(int64_t)v;   /* out of range = x87 "indefinite", low bits 0 */
     }
+    if (len > 0 && g_rec_rect) g_rec_rect(4, 152, 4 * (1 + len) - 1, 154);
     for (int i = 0; i < len; i++) {
         uint8_t c = (uint8_t)(0x6F - i / 10);
         uint16_t base = video_draw_offset();
@@ -221,8 +222,10 @@ void enemy_update_type8(int s)
     int16_t frame = g_en.c034[s], anim, di;
     if (frame < 2) { g_en.facing[s] = 0; di = frame; } else { g_en.facing[s] = 1; di = I16(frame - 2); }
     anim = g_en.facing[s];
+    g_rec_tag = TAG_ENEMY + s;
     if (g_en.flash[s] % 2 != 0) fx_draw_solid(sheet, wrap, sx, sy, anim, di);     /* 2896 */
     else                        fx_draw(sheet, wrap, sx, sy, anim, di);           /* 249E */
+    g_rec_tag = 0;
     if (g_en.flash[s] != 0) g_en.flash[s]--;
     if (g_en.c034[s] == 1 && rng_next(10) == 0 && g_en.x[s] > g_cam.player_xcol) {
         projectile_spawn(g_en.x[s], g_en.y[s], 1, 0, g_en.def[s], sheet);
@@ -265,8 +268,10 @@ void enemy_update_boss(void)
     }
     g_en.facing[s] = g_en.x[s] > g_cam.player_xcol ? 1 : 0;
     int16_t sx = I16(g_en.x[s] - (g_cam.cam_x << 1)), sy = I16(g_en.y[s] - (g_cam.cam_row << 4));
+    g_rec_tag = TAG_ENEMY + s;
     if (g_en.flash[s] % 2 != 0) fx_draw_solid(sheet, wrap, sx, sy, g_en.facing[s], g_en.c034[s]);
     else                        fx_draw(sheet, wrap, sx, sy, g_en.facing[s], g_en.c034[s]);
+    g_rec_tag = 0;
     if (g_en.flash[s] != 0) g_en.flash[s]--;
 
     if (g_en.c0f4[s] == 0) {
@@ -446,8 +451,10 @@ void enemies_update(void)
         if (EF(bfa4, s) != -99) EF(c034, s) = hdrw(sb, 19);    /* jump frame */
         {
             int16_t sx = I16(EF(x, s) - (g_cam.cam_x << 1)), sy = I16(EF(y, s) - (g_cam.cam_row << 4));
+            g_rec_tag = TAG_ENEMY + s;
             if (EF(flash, s) % 2 != 0) fx_draw_solid(sb, hdrw(sb, 13), sx, sy, EF(facing, s), EF(c034, s));
             else                       fx_draw(sb, hdrw(sb, 13), sx, sy, EF(facing, s), EF(c034, s));
+            g_rec_tag = 0;
             if (EF(flash, s) != 0) EF(flash, s)--;
         }
     dust:

@@ -1,4 +1,5 @@
 #include "vga.h"
+#include "state.h"
 #include <string.h>
 
 static struct {
@@ -59,6 +60,10 @@ void vga_render_rgba(uint32_t out[320 * 200])
 {
     static uint8_t idx[320 * 200];
     vga_render_indexed(idx);
+    vga_indexed_to_rgba(idx, out);
+}
+void vga_indexed_to_rgba(const uint8_t idx[320 * 200], uint32_t out[320 * 200])
+{
     for (int i = 0; i < 320 * 200; i++) {
         const uint8_t *c = v.screen_on ? v.pal[idx[i]] : v.pal[0];
         uint32_t r = (uint32_t)((c[0] << 2) | (c[0] >> 4));
@@ -73,3 +78,12 @@ uint8_t vga_get_map_mask(void)  { return v.map_mask; }
 uint8_t vga_get_read_plane(void){ return v.read_plane; }
 uint8_t vga_get_bit_mask(void)  { return v.bit_mask; }
 int     vga_get_screen_on(void) { return v.screen_on; }
+
+void vga_state(state_visit_fn visit) { visit(&v, sizeof v); }
+void vga_render_indexed_at(uint16_t start, uint8_t out[320 * 200])
+{
+    for (int y = 0; y < 200; y++)
+        for (int x = 0; x < 320; x++)
+            out[y * 320 + x] = v.plane[x & 3][(uint16_t)(start + y * 80 + (x >> 2))];
+}
+uint8_t vga_palette(int i, int c) { return v.pal[i & 255][c % 3]; }

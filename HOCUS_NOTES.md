@@ -592,3 +592,106 @@ Test option `--pad STR`: attaches an SDL virtual controller and presses one inpu
 `A B X Y`, `S` Start, `V` Back, `l r` shoulders (each released on the next step); `>`/`<` toggle holding the left
 stick right/left, `j` toggles the right trigger, `.` waits.  E.g. `--episode 0 --level 0 --pad ">..A" --frames 133
 --dump f.ppm` (walk right and jump), `--skip-intro --pad ".DDDA"` (Instructions).
+
+## 46. Enhanced display smoothing ("Smooth: display") - `src/interp.[ch]`
+
+The logic keeps its tick (17.5 / 20 / 23.3 Hz); the picture between ticks is redrawn at the display rate with
+objects and camera blended between the previous and the latest tick (the Techbot approach).  Toggle: **F11** or
+the **right stick click (R3)**; `--smooth` starts with it on; a "SMOOTH: DISPLAY / OFF" notice shows for 1.2 s.
+Off = Original: nothing shown changes (the hooks only record).
+
+**Recording** (every tick, whether smoothing is on or not, so toggling works at once):
+* `LoopHooks` gained `level_start` (after each setup), `tick_begin` (after `camera_update` / `level_player_tiles`,
+  before the world draw), `tick_nosmooth` (the "press a key" picture is drawn into the frame), `tick_shown` (loop
+  head, the finished frame was just shown, before the tick wait) and `tick_waited`.
+* `tick_begin` stores the camera (`cam_x`, `cam_row`, `cam_col`, `col_odd`), the tick's scheduled clock, and a
+  25 x 15 snapshot of the visible map cells (2 cells of margin): the tile pass (`map_animate`) runs *after* the draw
+  in the same tick, so the live map is already a tick ahead when the picture is shown.
+* `sprite.c`: `g_rec_blit` is called by `blit()` (all six blitters) with its arguments; `g_rec_pixel` by the spark
+  bursts (tag per particle) and the falling sparkles (untagged: their plane is random each tick); `g_rec_rect` by the
+  boss bar (screen-fixed, copied from the VGA page).  `g_rec_tag` (TAG_* in sprite.h) is set around each draw:
+  player (0x10, two blits when y < 0 matched by occurrence), teleport (0x11), shot icons over the player (0x20+i),
+  enemies 0x100+slot, player shots 0x200+slot, enemy projectiles 0x300+i, score tags 0x400+i, puffs 0x500+i.
+* A frame with the screen flash (`g_lv.flash`) or the pause picture is marked "not smoothable".
+
+**Rendering** (`interp_render`, called by `present()`; only during a level's tick wait - menus, hint boxes, status
+messages, fades and end screens all show the VGA page):
+* alpha = (clock - scheduled clock of the latest tick) / interval, clamped 0..1; the previous tick is used only if it
+  was smoothable and the camera moved <= 32 px (otherwise alpha = 1: snaps on teleports / level start).
+* Cameras are interpolated separately: sprites are positioned relative to `cam_x * 8` px, the map by
+  `cam_col * 16 + col_odd * 8` (the original picks the half-cell routine by the *player's* X parity), both by
+  `cam_row * 16` vertically; the backdrop origin is `cam_x * 4` px (half speed), rows fixed.  Each camera is rounded
+  to whole pixels before objects are placed, so a world-fixed object stays locked to the map.
+* Map + backdrop: every play-area pixel is the cell's tile pixel (layer1, else layer2) or, for a cell empty in both,
+  the backdrop pixel ((origin + X) mod 320, same row) - exactly what `map_draw_*` + `backdrop_draw_*` produce.
+* Sprites: the recorded blit is replayed by a copy of `blit()`'s opcode walk that writes into a linear buffer at a
+  pixel offset with its own clipping to the play area (so a sprite clipped at the screen edge on its tick is
+  complete when blended inwards).  Position = world position (screen + camera of its own tick) blended with the
+  same tag / occurrence in the previous tick (same kind and sheet, <= 48 px apart, else no blend), minus the
+  rounded camera.  Draw order and appearance (frame, flash) are the latest tick's.  Untagged draws are world-fixed.
+* Rows 160..199 (status panel) come from the VGA page.
+
+**Timing:** with smoothing on, `timer_frame_wait` advances its schedule by exactly one interval (resync if more than
+one behind), so a present blocking on vsync cannot slow the game; `idle()` presents every call (vsync paces it; at
+most ~250 per second without vsync).  Measured: 173 ticks in 10 s at Slow (expected 17.5 / s).  The picture is up to
+one tick behind (57 / 50 / 43 ms).
+
+**Tile snapshot:** each frame also keeps a copy of the packed tile graphics (page 2 up to `page_off`).  When the
+player falls below the screen, the original's unclipped player blit runs past the end of page 1 into page 2 and
+damages the tile (and later sprite) graphics - an original glitch, faithfully reproduced; on DOS the damage shows from
+the next frame, so the renderer must not read the live tiles.
+
+**Verification:** `--smooth-check` renders the smooth picture at alpha 1 after every tick and compares the play area
+with the VGA page (the first difference is saved as `smooth_bad.ppm` / `vga_bad.ppm`): 0 differences over 1,782
+ticks on E1 levels 1, 2, 5 and on E1L9, E2L9, E3L6, E3L9, E4L3, E4L9 (bosses included).  E2L4 (falling into the lava
+off the bottom of the screen) differs on 4 of 1,498 ticks: by then the glitch above has also damaged sprite graphics,
+which in the original a sprite drawn later in the same frame already picks up; harmless (the screen is full of the
+glitch's garbage at that point).
+`--dump-alpha A --frames N --dump f.ppm` writes the smooth picture at alpha A after the Nth tick (used to inspect
+the in-between frames: camera, backdrop, shots, jumps).  The differential tests (`tests/diff_run.py all`) still pass.
+
+## 47. Run-ahead, whole-state save / restore, tap latching
+
+**Why:** the original draws Hocus *before* reading the controls in each tick (camera, world, player draw, enemies,
+effects, `frame_controls`, shots, `player_move`), so a key press shows up in the picture after next: 1-2 ticks
+on DOS.  Blending the previous tick into the latest (section 46) added a full tick on top.
+
+**Run-ahead** (`interp.c`, setting 0 / 1 / 2, default 1; **F12** or **left stick click (L3)** cycles it - pressing
+it with smoothing off turns smoothing on; `--runahead N`; the notice shows "SMOOTH: DISPLAY  RUN-AHEAD n"):
+* At `tick_shown` (loop head, page flipped, before the wait) the whole game state is saved (`state_save`), the
+  next tick (or two) is run by `level_tick_ahead()` in loop.c - the frame body of `level_run` without the joystick
+  poll, pause picture, menus, hot keys and exit checks - recorded into `ahead[0]` / `ahead[1]` with its finished
+  page image, and everything is restored.  Sounds (`play_sfx`) and hint boxes do nothing during it
+  (`interp_speculating()`).  A second tick isn't run if the first ends the level (death / finish timer at 1); for it
+  the pages are flipped as the real loop does.
+* Blend pairs: 0 = previous -> latest (a tick behind); 1 = latest -> `ahead[0]`; 2 = `ahead[0]` -> `ahead[1]`.
+  Without the needed ahead frames it holds the latest tick.
+* Run-ahead 1 is exact: the next tick's picture is already decided when the tick ends (the controls it reads come
+  after its drawing; only the look keys, read by the camera before drawing, could differ).  Measured: 0 real ticks
+  differing from their prediction in 1,785 (E1L1, E2L4; the 4 off-screen glitch ticks of section 46 excepted).
+* Run-ahead 2 depends on the controls held during the next tick.  When a game key changes during the tick wait,
+  the run-ahead is redone at once (`interp_input_changed()` from `game_key`), so the picture starts reacting in the
+  same wait as the press.  It can mispredict if the controls change again before the tick; the blend then bends.
+* Timeline (trace, jump pressed during the wait after tick 61): tick 62 reads it and moves Hocus (drawn still at the
+  old place); tick 63's picture shows the jump.  DOS / run-ahead 0: on screen from tick 63 (run-ahead 0 reaches it
+  only at 64); run-ahead 1: blends towards it from tick 62; run-ahead 2: from the press itself.
+
+**State** (`state.[ch]`): every writable variable of the game modules, listed from `nm` on the objects (globals by
+name; private ones through `vga_state`, `video_state`, `rng_state`, `loader_state`): about 420 KB including the
+256 KB of VGA memory, copied twice per tick.  Not saved: hook pointers, the DAT handle, the timer, load-time
+constants, the platform layer.  **Add any new game global / static to `state.c`.**  It is also the base for
+quicksave.
+
+**Tap latching** (`game_key()` in main_sdl.c, with smoothing on): a key pressed and released within one tick wait
+was never seen by the original (it reads key states once per tick).  Its release is now held back until the next tick
+has run (`tap_flush()` at `tick_shown`, and whenever no level is waiting).  Keyboard and controller both.
+
+**Tests:**
+* `--frame-hash FILE`: a hash of every shown page + palette.  Same scripted input with run-ahead 0, 1, 2 (and with
+  re-prediction on input changes and taps): identical over ~1,900 ticks on E1L1, E2L4, E3L9, E4L3 - nothing the
+  run-ahead touches leaks into the real game.
+* `--smooth-check` now also prints how many real ticks differed from what was run ahead for them.
+* `--pad` gained `t`: tap A (down and up before the next tick).  Without smoothing the tap is lost (as on DOS); with
+  it Hocus jumps.
+* `--dump-alpha` now captures in the tick wait after the input has been read (closer to real play).
+* `tests/diff_run.py all` (Original mode vs the DOS game): still 72 runs, 0 mismatches.

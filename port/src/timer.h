@@ -27,4 +27,10 @@ void     timer_reset(void);                  /* clock = 0, last = 0 (loop start)
 uint32_t timer_clock(void);                  /* DS:7908 equivalent, 140 Hz */
 void     timer_set_clock(uint32_t v);        /* the game writes the clock (0BA5:4D36) */
 void     timer_frame_wait(int speed);        /* 0BA5:4D67 */
+/* Enhanced display smoothing: with `steady` on, a frame wait advances the schedule by exactly one interval
+ * (instead of restarting it from the moment the wait noticed the tick), so a present that blocks on vsync
+ * cannot slow the game down; more than one interval behind, it resynchronises.  Off = the original. */
+void     timer_set_steady(int on);
+double   timer_clock_frac(void);              /* the 140 Hz clock with its fraction */
+uint32_t timer_last(void);                    /* clock value of the last tick the frame wait accepted */
 #endif

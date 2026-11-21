@@ -1,4 +1,5 @@
 #include "loader.h"
+#include "state.h"
 #include "dat.h"
 #include "level.h"
 #include "map.h"
@@ -131,4 +132,10 @@ int level_setup(int mode)
     video_pal_apply();
     timer_reset(); g_enemy_sound_deadline = 0;
     return 0;
+}
+
+void loader_state(state_visit_fn visit)
+{
+    visit(s_tiles, sizeof s_tiles); visit(s_dyn, sizeof s_dyn); visit(s_alt, sizeof s_alt); visit(s_fg, sizeof s_fg);
+    visit(s_bg, sizeof s_bg); visit(s_info, sizeof s_info); visit(s_defs, sizeof s_defs);
 }

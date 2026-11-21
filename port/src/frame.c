@@ -107,8 +107,10 @@ void shots_update(void)
             g_fx.e_y[s] = (int16_t)(y - 0x10);
             y = g_fx.e_y[s];
             if (x > 0x4F || y < 0) { shot_free(s); continue; }
+            g_rec_tag = TAG_SHOT + s;
             fx_draw(0, (int16_t)g_spr.hdr[0][23], x, y, g_shots.dir[s],
                     (int16_t)(g_spr.hdr[0][26] + (g_shots.power[s] ? 3 : 1)));
+            g_rec_tag = 0;
             if (rng_next(10) > 2) fx_spawn_sparkle(x + 2 * g_lv.facing, y + 5);
             continue;
         }
@@ -121,8 +123,10 @@ void shots_update(void)
             if (fg_rd(di) != 0xFF || fg_rd(di + 1) != 0xFF) { fx_spawn_burst(x * 4 + 0x18, y + 0xA); shot_free(s); continue; }
             x += 4; g_shots.x[s] = (int16_t)x;
             if (x > 0x4F || y < 0) { shot_free(s); continue; }
+            g_rec_tag = TAG_SHOT + s;
             fx_draw(0, (int16_t)g_spr.hdr[0][23], x, y, g_shots.dir[s],
                     (int16_t)(g_spr.hdr[0][26] + (g_shots.power[s] ? 2 : 0)));
+            g_rec_tag = 0;
             if (rng_next(10) > 2) fx_spawn_sparkle(x, y + 5);
         } else {                                      /* flying left */
             if (shot_tile_hit(s, di,        x - c2,     y - 8)) continue;
@@ -132,8 +136,10 @@ void shots_update(void)
             if (fg_rd(di - 1) != 0xFF || fg_rd(di) != 0xFF) { fx_spawn_burst(x * 4 + 1, y + 2); shot_free(s); continue; }
             x -= 4; g_shots.x[s] = (int16_t)x;
             if (x < -3 || y < 0) { shot_free(s); continue; }
+            g_rec_tag = TAG_SHOT + s;
             fx_draw(0, (int16_t)g_spr.hdr[0][23], x, y, g_shots.dir[s],
                     (int16_t)(g_spr.hdr[0][26] + (g_shots.power[s] ? 2 : 0)));
+            g_rec_tag = 0;
             if (rng_next(10) > 2) fx_spawn_sparkle(x, y + 5);
         }
     }
@@ -304,6 +310,7 @@ void player_draw(void)
         if (g_cam.vfreeze && g_mv.jump_idx > g_mv.jump_peak) g_lv.ce92 = (int16_t)g_spr.hdr[0][20];
         if (g_mv.fall) g_lv.ce92 = (int16_t)g_spr.hdr[0][20];
         int fr = g_lv.ce92, wrap = (int16_t)g_spr.hdr[0][13];
+        g_rec_tag = TAG_PLAYER;
         if (y < 0) s_blit(0x249E, 0, wrap, x, y, dir, fr);
         if (g_player.invuln % 2 != 0) {
             if (y < 0) s_blit(0x2896, 0, wrap, x, y, dir, fr); else s_blit(0x27E2, 0, x, y, dir, fr, 0);
@@ -317,8 +324,10 @@ void player_draw(void)
         if (t < 5) k = 0; else if (t < 0xA) k = 1; else if (t < 0xF) k = 2; else if (t < 0x14) k = 3;
         else if (t <= 0x19) { int r1 = rng_next(2); int r2 = rng_next(2); yy = y + r1 - r2; k = 4; }
         else if (t < 0x1E) k = 3; else if (t < 0x23) k = 2; else if (t < 0x28) k = 1;
+        g_rec_tag = TAG_TELEPORT;
         if (k >= 0) s_blit(0x23BA, 2, x, yy, dir, k, 0);
     }
+    g_rec_tag = 0;
     if (g_lv.item4_timer) {
         int r1 = rng_next(10); int r2 = rng_next(7);
         fx_spawn_puff(x + r2 - 2, y + r1 + 0x14);
@@ -327,8 +336,11 @@ void player_draw(void)
     if (g_lv.ce94) {
         if (g_lv.ce98) {
             int n = g_lv.ce94 > 3 ? 3 : g_lv.ce94;
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < n; i++) {
+                g_rec_tag = TAG_PICON + i;
                 s_blit(0x249E, 0, (int16_t)g_spr.hdr[0][23], x + 1, y - 0xE - i * 0xE, dir, (int16_t)(g_spr.hdr[0][26] + 2));
+                g_rec_tag = 0;
+            }
         }
         if (--g_lv.ce96 == 0) { g_lv.ce96 = 5; g_lv.ce98 = g_lv.ce98 ? 0 : 1; }
     }

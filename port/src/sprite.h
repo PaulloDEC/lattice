@@ -56,6 +56,17 @@ void sprite_pack_tiles(void);
 
 /* sheet=a0 wrap=a1 x=a2 (byte columns) y=a3 anim=a4 (0 or 1) frame=a5 : arguments in call order */
 void sprite_draw(int sheet, int wrap, int x, int y, int anim, int frame);
+
+/* ---- draw recording (Enhanced display smoothing; NULL = off, the default).  Every blit calls g_rec_blit
+ * with its arguments before drawing; the pixel effects and the boss bar call g_rec_pixel / g_rec_rect.
+ * g_rec_tag names the object being drawn (set by the caller, 0 = unknown) so a renderer can match it
+ * between ticks.  Recording never changes what is drawn. */
+extern int g_rec_tag;
+extern void (*g_rec_blit)(int mode, int clip, int sheet, int wrap, int x, int y, int anim, int frame);
+extern void (*g_rec_pixel)(int x, int y, int color, int tag);       /* x, y in pixels */
+extern void (*g_rec_rect)(int x0, int y0, int x1, int y1);           /* screen-fixed area, pixels, inclusive */
+enum { TAG_PLAYER = 0x10, TAG_TELEPORT = 0x11, TAG_PICON = 0x20, TAG_ENEMY = 0x100, TAG_SHOT = 0x200,
+       TAG_PROJ = 0x300, TAG_SCORE = 0x400, TAG_PUFF = 0x500, TAG_BURST = 0x1000 };
 /* The other blitters of 0BA5, same frame tables and opcode streams:
  *   23BA sprite_draw_raw(sheet, x, y, anim, frame)            own pixels, no clipping
  *   26B3 sprite_solid(0, sheet, wrap, x, y, anim, frame)       solid cell marker0 (colour 0x60), clipped

@@ -1,4 +1,5 @@
 #include "rng.h"
+#include "state.h"
 
 static int16_t table[RNG_TABLE_SIZE];   /* DS:711A */
 static uint16_t index_;                 /* DS:7118 */
@@ -20,3 +21,5 @@ int rng_next(int n)
     if ((int16_t)index_ > 0x3E7) index_ = 0;          /* original: cmp ..., 3E7 ; jle */
     return (int16_t)(table[index_] % (int16_t)n);     /* cwd + idiv: signed remainder */
 }
+
+void rng_state(state_visit_fn visit) { visit(table, sizeof table); visit(&index_, sizeof index_); }

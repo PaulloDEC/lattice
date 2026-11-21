@@ -1,4 +1,5 @@
 #include "video.h"
+#include "state.h"
 #include "vga.h"
 #include <string.h>
 
@@ -232,4 +233,10 @@ void video_load_palette(const uint8_t *e, uint32_t size, int slot, int apply)
         memcpy(pal_target + dst, e, n);
     }
     if (apply) video_set_palette(pal_target, 0, 256);
+}
+
+void video_state(state_visit_fn visit)
+{
+    visit(page_start, sizeof page_start); visit(&draw_off, sizeof draw_off); visit(&draw_page, sizeof draw_page);
+    visit(&visible_page, sizeof visible_page); visit(pal_target, sizeof pal_target); visit(pal_work, sizeof pal_work);
 }

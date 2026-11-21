@@ -75,7 +75,9 @@ void projectiles_update(void)
             continue;
         }
         int sh = g_proj.sheet[i];
+        g_rec_tag = TAG_PROJ + i;
         fx_draw(sh, (sh >= 0 && sh < SPR_SLOTS) ? (int16_t)g_spr.hdr[sh][13] : 0, sx, sy, g_proj.dir[i], g_proj.frame[i]);
+        g_rec_tag = 0;
         if (g_proj.frame[i] < g_proj.last_frame[i]) g_proj.frame[i]++;
         if (g_proj.dir[i] == 0) g_proj.x[i] = I16(g_proj.x[i] + g_proj.speed[i]);
         else                    g_proj.x[i] = I16(g_proj.x[i] - g_proj.speed[i]);

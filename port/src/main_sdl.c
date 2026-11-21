@@ -6,6 +6,9 @@
  *         [--frames N --dump file.ppm]      (headless smoke test: run N frames, write the last frame, exit)
  *   Keys: arrows move, Ctrl jump, Alt fire (the game's own defaults), P pause, M / S music / sound, Esc menu.
  *   Game controller: see the controller section below (D-pad/stick move, A jump, X/B fire, Start menu).
+ *   Smoothing (Enhanced display interpolation, interp.c): F11 or right stick click toggles; --smooth starts with it on.
+ *   Run-ahead (default 1): F12 or left stick click cycles 0 / 1 / 2; --runahead N.
+ *   Tests: --smooth-check (smooth picture at each tick == VGA page), --dump-alpha A (with --frames N --dump f.ppm).
  */
 #include <SDL.h>
 #include <stdio.h>
@@ -27,9 +30,10 @@
 #include "music.h"
 #include "enemy.h"
 #include "frame.h"
+#include "interp.h"
 
 static SDL_Window *g_win; static SDL_Renderer *g_ren; static SDL_Texture *g_tex;
-static int g_quit, g_dump_at = -1; static const char *g_dump_file;
+static int g_quit, g_dump_at = -1; static const char *g_dump_file; static double s_dump_alpha = -1;
 static uint32_t g_pix[320 * 200];
 
 /* SDL scancode -> DOS set-1 make code (0 = unmapped).  Extended keys use their plain code, as the game's key table does. */
@@ -56,10 +60,51 @@ static void fatal(const char *msg)               /* stderr is invisible in a Win
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Hocus Pocus", msg, NULL);
 }
 
+static uint32_t s_notice_until; static const char *s_notice;
+static void notice(const char *t) { s_notice = t; s_notice_until = SDL_GetTicks() + 1200; }
+static void draw_notice(uint32_t *pix)           /* small white text with a shadow, top left; drawn over the output only */
+{
+    const uint8_t *f = ui_font();
+    if (!s_notice || !f || SDL_TICKS_PASSED(SDL_GetTicks(), s_notice_until)) return;
+    for (int pass = 0; pass < 2; pass++) {
+        int x = 5 - pass, y = 5 - pass;
+        uint32_t col = pass ? 0xFFFFFFFFu : 0xFF000000u;
+        for (const char *s = s_notice; *s; s++) {
+            int c = (unsigned char)*s;
+            if (c == ' ') { x += 4; continue; }
+            if (c < 0x21 || c > 0x7A) continue;
+            int g = c - 0x21, m = 0;
+            for (int r = 0; r < 8; r++) for (int i = 0; i < 8; i++) if (f[g * 8 + r] >> i & 1) { if (i > m) m = i; if (x + i >= 0 && x + i < 320 && y + r < 200) pix[(y + r) * 320 + x + i] = col; }
+            x += m + 2;
+        }
+    }
+}
+static void hint_box(int i) { if (!interp_speculating()) ui_hint_box(i); }    /* never from a run-ahead tick */
+static char s_notice_buf[48];
+static void smooth_notice(void)
+{
+    if (!interp_enabled()) notice("SMOOTH: OFF");
+    else { snprintf(s_notice_buf, sizeof s_notice_buf, "SMOOTH: DISPLAY  RUN-AHEAD %d", interp_runahead()); notice(s_notice_buf); }
+}
+static void cycle_runahead(void)                  /* F12 / left stick click: 0 -> 1 -> 2 -> 0 (turns smoothing on) */
+{
+    if (!interp_enabled()) interp_set_enabled(1);
+    else interp_set_runahead((interp_runahead() + 1) % 3);
+    smooth_notice();
+}
+static void toggle_smooth(void)
+{
+    interp_set_enabled(!interp_enabled());
+    smooth_notice();
+}
+
 static void present(void)
 {
     if (!g_ren) return;
-    vga_render_rgba(g_pix);
+    static uint8_t idx[320 * 200];
+    if (!interp_render(idx)) vga_render_indexed(idx);
+    vga_indexed_to_rgba(idx, g_pix);
+    draw_notice(g_pix);
     SDL_UpdateTexture(g_tex, NULL, g_pix, 320 * 4);
     SDL_RenderClear(g_ren);
     SDL_RenderCopy(g_ren, g_tex, NULL, NULL);      /* logical size 320x240: 200 rows stretched to 4:3, as on a CRT */
@@ -77,8 +122,31 @@ static void menu_flush(void) { s_kqn = 0; s_tqn = 0; }
 static void pad_open_first(void); static void pad_release_all(void); static void pad_button(int b, int down); static void pad_axis(int a, int v);
 static SDL_GameController *s_pad;
 static void pad_script_step(void);
+static void toggle_smooth(void); static void cycle_runahead(void);
+
+/* Tap latching (with smoothing on): a key pressed and released between two ticks would never be seen by the
+ * game (the original reads key states once per tick).  Its release is held back until the next tick has run. */
+static uint8_t s_tap_down[128], s_tap_held[128];
+static void tap_flush(void)                       /* a tick has read the keys (or no level is waiting) */
+{
+    for (int k = 0; k < 128; k++) {
+        s_tap_down[k] = 0;
+        if (s_tap_held[k]) { s_tap_held[k] = 0; input_scancode((uint8_t)(k | 0x80)); }
+    }
+}
+static void game_key(uint8_t sc)
+{
+    uint8_t k = sc & 0x7F;
+    if (interp_enabled() && interp_ready()) {
+        if (!(sc & 0x80)) { s_tap_down[k] = 1; s_tap_held[k] = 0; }
+        else if (s_tap_down[k]) { s_tap_held[k] = 1; return; }
+    }
+    input_scancode(sc);
+    interp_input_changed();
+}
 static void pump(void)
 {
+    if (!interp_ready()) tap_flush();
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) g_quit = 1;
@@ -97,6 +165,8 @@ static void pump(void)
                 Uint32 f = SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
                 SDL_SetWindowFullscreen(g_win, f ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP); continue;
             }
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11) { toggle_smooth(); continue; }
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F12) { cycle_runahead(); continue; }
             if (e.type == SDL_KEYDOWN && sc && s_keys < 16) s_keys++;
             if (e.type == SDL_KEYDOWN) {
                 SDL_Keycode k = e.key.keysym.sym;
@@ -107,7 +177,7 @@ static void pump(void)
                 else if (k == SDLK_SPACE) kq_push(' '); else if (k == SDLK_BACKSPACE) kq_push(FK_BKSP);
                 else if (k >= 'a' && k <= 'z') kq_push(k - 32); else if (k >= '0' && k <= '9') kq_push(k);
             }
-            if (sc) input_scancode(e.type == SDL_KEYDOWN ? sc : (uint8_t)(sc | 0x80));
+            if (sc) game_key(e.type == SDL_KEYDOWN ? sc : (uint8_t)(sc | 0x80));
         }
     }
 }
@@ -132,7 +202,7 @@ static void vb_emit(int vb, int down)
     static const int mkey[VB_COUNT] = { FK_LEFT, FK_RIGHT, FK_UP, FK_DOWN, FK_ENTER, 0, FK_PGUP, FK_PGDN, FK_ESC, FK_ESC, 0 };
     uint8_t sc = act[vb] >= 0 ? g_key_scancode[g_binding[act[vb]]] : vb == VB_START ? 0x01 : 0x19;
     if (down) { if (s_keys < 16) s_keys++; if (mkey[vb]) kq_push(mkey[vb]); }
-    input_scancode(down ? sc : (uint8_t)(sc | 0x80));
+    game_key(down ? sc : (uint8_t)(sc | 0x80));
 }
 static void vb_set(int vb, int src, int down)
 {
@@ -165,6 +235,8 @@ static void pad_button(int b, int down)
     case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: vb_set(VB_LOOKDN, b, down); break;
     case SDL_CONTROLLER_BUTTON_START:      vb_set(VB_START, b, down); break;
     case SDL_CONTROLLER_BUTTON_BACK:       vb_set(VB_PAUSE, b, down); break;
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK: if (down) toggle_smooth(); break;    /* R3: smoothing on / off */
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK:  if (down) cycle_runahead(); break;   /* L3: run-ahead 0 / 1 / 2 */
     default: break;
     }
 }
@@ -190,7 +262,8 @@ static void pad_axis(int a, int v)
 }
 
 /* --pad STR (test): drive an SDL virtual game controller, one step per 30 menu/frame ticks.  U D L R = D-pad,
- * A B X Y, S = Start, V = Back, l r = shoulders; each press is released on the next step.  '>' / '<' toggle
+ * A B X Y, S = Start, V = Back, l r = shoulders; each press is released on the next step; t = tap A (down and up
+ * before the next tick).  '>' / '<' toggle
  * holding the left stick right / left, 'j' toggles holding the right trigger; '.' waits one step. */
 static const char *s_pad_script; static int s_pad_vj = -1, s_pad_tick, s_pad_release = -1;
 static void pad_script_step(void)
@@ -215,6 +288,7 @@ static void pad_script_step(void)
     case '>': hold_x = hold_x > 0 ? 0 : 1; SDL_JoystickSetVirtualAxis(j, SDL_CONTROLLER_AXIS_LEFTX, hold_x * 30000); break;
     case '<': hold_x = hold_x < 0 ? 0 : -1; SDL_JoystickSetVirtualAxis(j, SDL_CONTROLLER_AXIS_LEFTX, hold_x * 30000); break;
     case 'j': hold_t = !hold_t; SDL_JoystickSetVirtualAxis(j, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, hold_t ? 32767 : 0); break;
+    case 't': SDL_JoystickSetVirtualButton(j, SDL_CONTROLLER_BUTTON_A, 1); SDL_JoystickUpdate(); SDL_JoystickSetVirtualButton(j, SDL_CONTROLLER_BUTTON_A, 0); break;   /* tap A within one tick */
     default: break;
     }
     if (b >= 0) { SDL_JoystickSetVirtualButton(j, b, 1); s_pad_release = b; }
@@ -222,9 +296,17 @@ static void pad_script_step(void)
 }
 
 static uint16_t s_last_start = 0xFFFF;
+static void dump_pending(void);
 static void idle(void)                        /* called while the frame timer waits */
 {
     pump();
+    dump_pending();
+    if (interp_enabled() && interp_ready()) {     /* smoothing: a new picture every display refresh (vsync paces it) */
+        static Uint64 last; Uint64 now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
+        if (last && (now - last) * 1000 < f * 4) { SDL_Delay(1); return; }    /* no vsync: at most ~250 per second */
+        last = now; present(); s_last_start = vga_get_start();
+        return;
+    }
     uint16_t st = vga_get_start();
     if (st != s_last_start) { s_last_start = st; present(); }
     SDL_Delay(1);
@@ -243,7 +325,7 @@ static int frame_hook(int n)
 {
     pad_script_step();
     menu_flush();                                 /* menu keys pressed during play (A = Enter, B = Esc...) must not leak into the next menu */
-    if (g_dump_at >= 0 && n == g_dump_at) { dump_frame(); g_quit = 1; }
+    if (g_dump_at >= 0 && n == g_dump_at && s_dump_alpha < 0) { dump_frame(); g_quit = 1; }
     if (g_esc_at >= 0 && n == g_esc_at) { if (g_fkey == 10) g_in.f10 = 1; else if (g_fkey == 1) g_in.f1 = 1; else if (g_fkey == 22) g_in.hot_v = 1; else if (g_fkey == 2) g_in.f2 = 1; else g_in.esc = 1; }          /* --esc-at N (test): press Esc at frame N */
     return g_quit;
 }
@@ -258,7 +340,7 @@ static int ui_kbhit(void)
 }
 static void pal_entry(int entry, int slot) { uint32_t n; uint8_t *p = dat_load(entry, &n); if (p) { video_load_palette(p, n, slot, 0); free(p); } }
 static SDL_AudioDeviceID g_audio;
-static void play_sfx(int id) { SDL_LockAudioDevice(g_audio); sound_play(id); SDL_UnlockAudioDevice(g_audio); }   /* the mixer runs on the audio thread */
+static void play_sfx(int id) { if (interp_speculating()) return; SDL_LockAudioDevice(g_audio); sound_play(id); SDL_UnlockAudioDevice(g_audio); }   /* the mixer runs on the audio thread */
 static void audio_cb(void *ud, Uint8 *stream, int len) { (void)ud; memset(stream, 0, len); sound_mix((int16_t *)stream, len / 2); music_render((int16_t *)stream, len / 2); }
 static void play_music(int entry, int loop)       /* 136b:01FF: stop the current song, load the DAT entry, play it (only while music is on) */
 {
@@ -299,8 +381,58 @@ static void wait_key(void)                   /* the "press a key" screen before 
 }
 static int end_screen(int finished, int goal, int collected) { return ui_end_screen(finished, goal, collected); }
 
+/* --smooth-check: after every shown tick, the smooth picture at alpha 1 must equal the VGA page (play area).
+ * --dump-alpha A with --frames N --dump f.ppm: write the smooth picture at alpha A after the Nth shown tick. */
+static int s_check, s_checked, s_check_bad, s_shown, s_dump_pending; static FILE *s_hash_f;   /* --frame-hash FILE: one line per tick */
+static void (*s_tick_shown_inner)(void);
+static void dump_indexed(const uint8_t *idx)
+{
+    FILE *f = fopen(g_dump_file, "wb"); if (!f) return;
+    vga_indexed_to_rgba(idx, g_pix);
+    fprintf(f, "P6\n320 200\n255\n");
+    for (int i = 0; i < 320 * 200; i++) { fputc(g_pix[i] & 255, f); fputc((g_pix[i] >> 8) & 255, f); fputc((g_pix[i] >> 16) & 255, f); }
+    fclose(f);
+}
+static void dump_pending(void)                   /* --dump-alpha: the smooth picture once this wait's input is in */
+{
+    static uint8_t a[320 * 200];
+    if (!s_dump_pending) return;
+    s_dump_pending = 0;
+    if (interp_render_at(a, s_dump_alpha)) dump_indexed(a); else dump_frame();
+    g_quit = 1;
+}
+static void tick_shown_main(void)
+{
+    tap_flush();                                     /* the tick that just ran has seen every tap; also before run-ahead */
+    s_tick_shown_inner();
+    ++s_shown;
+    static uint8_t a[320 * 200], b[320 * 200];
+    if (s_hash_f) {                                  /* FNV-1a of the shown page and the palette */
+        vga_render_indexed(b);
+        uint32_t h = 2166136261u;
+        for (int i = 0; i < 320 * 200; i++) h = (h ^ b[i]) * 16777619u;
+        for (int i = 0; i < 256; i++) for (int c = 0; c < 3; c++) h = (h ^ vga_palette(i, c)) * 16777619u;
+        fprintf(s_hash_f, "%d %08x\n", s_shown, h);
+    }
+    if (s_check && interp_render_latest(a)) {
+        vga_render_indexed(b); s_checked++;
+        int bad = 0; for (int i = 0; i < 320 * 160; i++) if (a[i] != b[i]) bad++;
+        if (bad) {
+            if (s_check_bad++ < 5) fprintf(stderr, "smooth-check: tick %d differs in %d pixels\n", s_shown, bad);
+            if (s_check_bad == 1) {                      /* first difference: smooth_bad.ppm / vga_bad.ppm */
+                const char *keep = g_dump_file;
+                g_dump_file = "smooth_bad.ppm"; dump_indexed(a);
+                g_dump_file = "vga_bad.ppm"; dump_indexed(b);
+                g_dump_file = keep;
+            }
+        }
+    }
+    if (s_dump_alpha >= 0 && g_dump_file && s_shown == g_dump_at) s_dump_pending = 1;    /* in idle(), after input */
+}
+
 int main(int argc, char **argv)
 {
+    int smooth = 0, runahead = 1;
     const char *dat = "HOCUS.DAT"; int episode = 0, level = 0, scale = 3, full = 0, frames = -1, end_test = -1, direct = 0; const char *test_screen = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dat") && i + 1 < argc) dat = argv[++i];
@@ -311,13 +443,18 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--skip-intro")) g_skip_intro = 1;
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) s_script = argv[++i];
         else if (!strcmp(argv[i], "--pad") && i + 1 < argc) s_pad_script = argv[++i];
+        else if (!strcmp(argv[i], "--smooth")) smooth = 1;
+        else if (!strcmp(argv[i], "--runahead") && i + 1 < argc) runahead = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--smooth-check")) s_check = 1;
+        else if (!strcmp(argv[i], "--frame-hash") && i + 1 < argc) s_hash_f = fopen(argv[++i], "w");
+        else if (!strcmp(argv[i], "--dump-alpha") && i + 1 < argc) s_dump_alpha = atof(argv[++i]);
         else if (!strcmp(argv[i], "--level") && i + 1 < argc) { level = atoi(argv[++i]); direct = 1; }
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) full = 1;
         else if (!strcmp(argv[i], "--end") && i + 1 < argc) end_test = atoi(argv[++i]);   /* show the end screen once (0 = died, 1 = finished) */
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) g_dump_file = argv[++i];
-        else { fprintf(stderr, "usage: %s [--dat HOCUS.DAT] [--episode 0..3] [--level 0..8] [--scale N] [--fullscreen] [--frames N --dump out.ppm]\n", argv[0]); return 2; }
+        else { fprintf(stderr, "usage: %s [--dat HOCUS.DAT] [--episode 0..3] [--level 0..8] [--scale N] [--fullscreen] [--smooth] [--runahead 0..2] [--frames N --dump out.ppm]\n", argv[0]); return 2; }
     }
     if (frames >= 0 && g_dump_file) g_dump_at = frames;
     if (dat_open(dat)) { char m[512]; snprintf(m, sizeof m, "Cannot open %s.\nCopy HOCUS.DAT from the registered Hocus Pocus v1.1 next to the program, or use --dat.", dat); fatal(m); return 1; }
@@ -350,11 +487,13 @@ int main(int argc, char **argv)
     vga_reset(); video_init(); video_set_vsync_callback(vsync);
     timer_init(NULL, idle);
     loop_install_defaults();
-    ui_set_poll(ui_poll); level_set_hint_callback(ui_hint_box);
+    ui_set_poll(ui_poll); level_set_hint_callback(hint_box);
     g_ui_hooks.img = ui_img; g_ui_hooks.kbhit = ui_kbhit; g_ui_hooks.getch = ui_getch;
     g_loop_hooks.message = ui_message; g_loop_hooks.palette_entry = pal_entry;
     rng_set_index(0); stars_init();
     g_loop_hooks.frame = frame_hook; g_loop_hooks.quit_menu = quit_menu; g_loop_hooks.menu_f1 = f_help; g_loop_hooks.menu_f2 = f_save; g_loop_hooks.menu_f3 = f_load; g_loop_hooks.menu_f10 = f_quit; g_loop_hooks.menu_v = f_vol; g_loop_hooks.pause_game = pause_game; g_loop_hooks.end_screen = end_screen; g_loop_hooks.wait_key = wait_key;
+    interp_install(); interp_set_enabled(smooth); interp_set_runahead(runahead); interp_set_check(s_check);
+    s_tick_shown_inner = g_loop_hooks.tick_shown; g_loop_hooks.tick_shown = tick_shown_main;
     g_difficulty = 1; g_game_speed = 0; g_joy_enabled = 0; g_lv.mana = 1;
     g_episode = (int16_t)episode; g_lv.level_icon = (int16_t)level;
     (void)s_frames_left;
@@ -372,7 +511,9 @@ int main(int argc, char **argv)
         SDL_Quit(); return 0;
     }
     if (!direct) {
-        frontend_run(); SDL_Quit(); return 0;
+        frontend_run();
+        if (s_check) { int pn, pb; interp_check_counts(&pn, &pb); printf("smooth-check: %d ticks compared, %d differ; run-ahead: %d ticks predicted, %d mispredicted\n", s_checked, s_check_bad, pn, pb); }
+        SDL_Quit(); return 0;
     }
     int pause = 1;
     while (!g_quit) {
@@ -381,6 +522,7 @@ int main(int argc, char **argv)
         if (r == -1 || r == -2) break;
         if (r == 1) { if (++g_lv.level_icon >= 9) { g_lv.level_icon = 0; if (++g_episode >= 4) g_episode = 0; } }
     }
+    if (s_check) { int pn, pb; interp_check_counts(&pn, &pb); printf("smooth-check: %d ticks compared, %d differ; run-ahead: %d ticks predicted, %d mispredicted\n", s_checked, s_check_bad, pn, pb); }
     SDL_Quit();
     return 0;
 }

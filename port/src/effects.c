@@ -1,4 +1,5 @@
 #include "effects.h"
+#include "sprite.h"
 #include "rng.h"
 #include "video.h"
 #include "vga.h"
@@ -55,7 +56,9 @@ void fx_update_scores(void)
 {
     for (int i = 0; i < 10; i++) {
         if (g_fx.b[i][3] == 0) continue;
+        g_rec_tag = TAG_SCORE + i;
         draw(1, g_fx.sprite_b, g_fx.b[i][0], g_fx.b[i][1], g_fx.b[i][4], g_fx.b[i][2]);
+        g_rec_tag = 0;
         g_fx.b[i][1] = (int16_t)(g_fx.b[i][1] - 2);
         g_fx.b[i][3] = (int16_t)(g_fx.b[i][3] - 1);
     }
@@ -85,8 +88,11 @@ void fx_update_puffs(void)
         else if (n == 7 || n == 3) frame = 2;
         else if (n == 6 || n == 4) frame = 3;
         else if (n == 5) frame = 4;
-        if (frame >= 0)
+        if (frame >= 0) {
+            g_rec_tag = TAG_PUFF + i;
             draw(3, g_fx.sprite_c, g_fx.c[i][0], g_fx.c[i][1], g_fx.c[i][3], frame);
+            g_rec_tag = 0;
+        }
         g_fx.c[i][2] = (int16_t)(n - 1);
     }
 }
@@ -115,6 +121,7 @@ void fx_update_sparkles(void)
                 uint8_t color = (uint8_t)(g_fx.d_t[i] / 4 + 0x78);
                 uint16_t off = (uint16_t)(video_draw_offset() + (uint16_t)(g_fx.d_y[i] * 80) + g_fx.d_x[i]);
                 vga_write(off, color);
+                if (g_rec_pixel) g_rec_pixel(g_fx.d_x[i] * 4 + (plane & 3), g_fx.d_y[i], color, 0);
             }
         }
         g_fx.d_y[i]++;
@@ -158,6 +165,7 @@ void fx_update_bursts(void)
                 video_set_map_mask((uint8_t)(1u << (x % 4)));
                 vga_write((uint16_t)(video_draw_offset() + (uint16_t)(y * 80) + (x >> 2)),
                           (uint8_t)g_fx.a_vel[b][p][2]);
+                if (g_rec_pixel) g_rec_pixel(x, y, (uint8_t)g_fx.a_vel[b][p][2], TAG_BURST + b * 16 + p);
             }
         }
         g_fx.a_flags[b] = (int8_t)(g_fx.a_flags[b] - 1);

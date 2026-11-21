@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 void ui_set_font(const uint8_t font[720]);        /* DS:6440 (far pointer in the original) */
+const uint8_t *ui_font(void);                      /* glyph g (char 0x21 + g) = 8 rows, bit i = pixel i */
 /* 06B8:05E9 text_draw(x, y, colour, str): solid colour; leaves latch mode ON (bit mask 0) like the original. */
 void text_draw(int x, int y, int colour, const char *s);
 /* 06B8:071F text_draw_grad(x, y, style, str): style 0 = flat colour 0x80, else row r of the glyph uses colour table[style-1] + r (a vertical
