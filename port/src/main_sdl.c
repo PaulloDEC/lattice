@@ -4,7 +4,8 @@
  *
  *   hocus [--dat HOCUS.DAT] [--episode 0..3] [--level 0..8] [--scale N] [--fullscreen]
  *         [--frames N --dump file.ppm]      (headless smoke test: run N frames, write the last frame, exit)
- *   Keys: arrows move, Ctrl fire, Alt jump (the game's own defaults), P pause, M / S music / sound, Esc quit.
+ *   Keys: arrows move, Ctrl jump, Alt fire (the game's own defaults), P pause, M / S music / sound, Esc menu.
+ *   Game controller: see the controller section below (D-pad/stick move, A jump, X/B fire, Start menu).
  */
 #include <SDL.h>
 #include <stdio.h>
@@ -49,6 +50,12 @@ static uint8_t dos_scancode(SDL_Scancode s)
     return 0;
 }
 
+static void fatal(const char *msg)               /* stderr is invisible in a Windows GUI build, so also show a box */
+{
+    fprintf(stderr, "%s\n", msg);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Hocus Pocus", msg, NULL);
+}
+
 static void present(void)
 {
     if (!g_ren) return;
@@ -67,11 +74,22 @@ static int s_tq[64], s_tqn;                      /* typed characters (name entry
 static void tq_push(int c) { if (s_tqn < 64) s_tq[s_tqn++] = c; }
 static int text_key(void) { if (!s_tqn) return 0; int c = s_tq[0]; memmove(s_tq, s_tq + 1, (--s_tqn) * sizeof(int)); return c; }
 static void menu_flush(void) { s_kqn = 0; s_tqn = 0; }
+static void pad_open_first(void); static void pad_release_all(void); static void pad_button(int b, int down); static void pad_axis(int a, int v);
+static SDL_GameController *s_pad;
+static void pad_script_step(void);
 static void pump(void)
 {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) g_quit = 1;
+        else if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open_first();
+        else if (e.type == SDL_CONTROLLERDEVICEREMOVED) {
+            if (s_pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(s_pad))) { pad_release_all(); SDL_GameControllerClose(s_pad); s_pad = NULL; pad_open_first(); }
+        }
+        else if ((e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) && s_pad && e.cbutton.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(s_pad)))
+            pad_button(e.cbutton.button, e.type == SDL_CONTROLLERBUTTONDOWN);
+        else if (e.type == SDL_CONTROLLERAXISMOTION && s_pad && e.caxis.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(s_pad)))
+            pad_axis(e.caxis.axis, e.caxis.value);
         else if (e.type == SDL_TEXTINPUT) { for (const char *t = e.text.text; *t; t++) if ((unsigned char)*t >= 0x20 && (unsigned char)*t < 0x7F) tq_push((unsigned char)*t); }
         else if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && !e.key.repeat) {
             uint8_t sc = dos_scancode(e.key.keysym.scancode);
@@ -94,6 +112,115 @@ static void pump(void)
     }
 }
 
+/* ---- game controller (SDL GameController: Xbox-style layout, so the Steam Deck and most pads work) ----
+ * Each pad input drives a virtual button; a virtual button behaves like pressing a key: it sends the DOS
+ * scancode of the key currently bound to its action (so "Define keys" still applies), counts as a key press
+ * for "press any key" screens, and queues a menu key.  Several pad inputs can drive one virtual button
+ * (D-pad and stick, A and LT): the button is down while any of them is held.
+ *   D-pad / left stick   move, up = doors/up, down = down       menus: navigate, left/right = sliders
+ *   A, LT                jump                                   menus: select
+ *   X, B, RT             fire                                   menus: B = back
+ *   LB / RB, right stick look up / down (the scroll keys)       text pages: page up / down
+ *   Start                Esc: open / close the in-game menu     Back/View  pause */
+enum { VB_LEFT, VB_RIGHT, VB_UP, VB_DOWN, VB_JUMP, VB_FIRE, VB_LOOKUP, VB_LOOKDN, VB_BACK, VB_START, VB_PAUSE, VB_COUNT };
+static uint32_t s_vb_src[VB_COUNT];               /* bit per pad input holding the virtual button */
+static int s_axis[SDL_CONTROLLER_AXIS_MAX];       /* -1 / 0 / +1 per axis after the dead zone */
+
+static void vb_emit(int vb, int down)
+{
+    static const int act[VB_COUNT] = { ACT_LEFT, ACT_RIGHT, ACT_UP, ACT_DOWN, ACT_JUMP, ACT_FIRE, ACT_SCROLL_UP, ACT_SCROLL_DOWN, ACT_FIRE, -1, -1 };
+    static const int mkey[VB_COUNT] = { FK_LEFT, FK_RIGHT, FK_UP, FK_DOWN, FK_ENTER, 0, FK_PGUP, FK_PGDN, FK_ESC, FK_ESC, 0 };
+    uint8_t sc = act[vb] >= 0 ? g_key_scancode[g_binding[act[vb]]] : vb == VB_START ? 0x01 : 0x19;
+    if (down) { if (s_keys < 16) s_keys++; if (mkey[vb]) kq_push(mkey[vb]); }
+    input_scancode(down ? sc : (uint8_t)(sc | 0x80));
+}
+static void vb_set(int vb, int src, int down)
+{
+    uint32_t was = s_vb_src[vb];
+    if (down) s_vb_src[vb] |= 1u << src; else s_vb_src[vb] &= ~(1u << src);
+    if (!was != !s_vb_src[vb]) vb_emit(vb, s_vb_src[vb] != 0);
+}
+static void pad_release_all(void)
+{
+    for (int vb = 0; vb < VB_COUNT; vb++) if (s_vb_src[vb]) { s_vb_src[vb] = 0; vb_emit(vb, 0); }
+    memset(s_axis, 0, sizeof s_axis);
+}
+static void pad_open_first(void)
+{
+    if (s_pad) return;
+    for (int i = 0; i < SDL_NumJoysticks(); i++)
+        if (SDL_IsGameController(i) && (s_pad = SDL_GameControllerOpen(i)) != NULL) return;
+}
+static void pad_button(int b, int down)
+{
+    switch (b) {                                  /* source ids: buttons 0..20, axes 24.. */
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  vb_set(VB_LEFT, b, down); break;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: vb_set(VB_RIGHT, b, down); break;
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:    vb_set(VB_UP, b, down); break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  vb_set(VB_DOWN, b, down); break;
+    case SDL_CONTROLLER_BUTTON_A:          vb_set(VB_JUMP, b, down); break;
+    case SDL_CONTROLLER_BUTTON_X:          vb_set(VB_FIRE, b, down); break;
+    case SDL_CONTROLLER_BUTTON_B:          vb_set(VB_BACK, b, down); break;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  vb_set(VB_LOOKUP, b, down); break;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: vb_set(VB_LOOKDN, b, down); break;
+    case SDL_CONTROLLER_BUTTON_START:      vb_set(VB_START, b, down); break;
+    case SDL_CONTROLLER_BUTTON_BACK:       vb_set(VB_PAUSE, b, down); break;
+    default: break;
+    }
+}
+static void pad_axis(int a, int v)
+{
+    int st;                                       /* dead zone with hysteresis: engage past 50%, release under 35% */
+    int prev = s_axis[a];
+    if (a == SDL_CONTROLLER_AXIS_TRIGGERLEFT || a == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
+        st = v > (prev ? 8000 : 16000);
+    else
+        st = v < (prev < 0 ? -11500 : -16400) ? -1 : v > (prev > 0 ? 11500 : 16400) ? 1 : 0;
+    if (st == prev) return;
+    s_axis[a] = st;
+    int src = 24 + a;
+    switch (a) {
+    case SDL_CONTROLLER_AXIS_LEFTX:  vb_set(VB_LEFT, src, st < 0); vb_set(VB_RIGHT, src, st > 0); break;
+    case SDL_CONTROLLER_AXIS_LEFTY:  vb_set(VB_UP, src, st < 0);   vb_set(VB_DOWN, src, st > 0); break;
+    case SDL_CONTROLLER_AXIS_RIGHTY: vb_set(VB_LOOKUP, src, st < 0); vb_set(VB_LOOKDN, src, st > 0); break;
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:  vb_set(VB_JUMP, src, st); break;
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: vb_set(VB_FIRE, src, st); break;
+    default: break;
+    }
+}
+
+/* --pad STR (test): drive an SDL virtual game controller, one step per 30 menu/frame ticks.  U D L R = D-pad,
+ * A B X Y, S = Start, V = Back, l r = shoulders; each press is released on the next step.  '>' / '<' toggle
+ * holding the left stick right / left, 'j' toggles holding the right trigger; '.' waits one step. */
+static const char *s_pad_script; static int s_pad_vj = -1, s_pad_tick, s_pad_release = -1;
+static void pad_script_step(void)
+{
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    static int hold_x, hold_t;
+    if (!s_pad_script) return;
+    if (s_pad_vj < 0) { s_pad_vj = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, SDL_CONTROLLER_AXIS_MAX, SDL_CONTROLLER_BUTTON_MAX, 0); SDL_JoystickOpen(s_pad_vj); return; }
+    if (++s_pad_tick % 30) return;
+    SDL_Joystick *j = SDL_JoystickFromPlayerIndex(0); if (!j) j = SDL_JoystickFromInstanceID(SDL_JoystickGetDeviceInstanceID(s_pad_vj));
+    if (!j) return;
+    if (s_pad_release >= 0) { SDL_JoystickSetVirtualButton(j, s_pad_release, 0); s_pad_release = -1; return; }
+    if (!*s_pad_script) return;
+    char c = *s_pad_script++; int b = -1;
+    switch (c) {
+    case 'U': b = SDL_CONTROLLER_BUTTON_DPAD_UP; break; case 'D': b = SDL_CONTROLLER_BUTTON_DPAD_DOWN; break;
+    case 'L': b = SDL_CONTROLLER_BUTTON_DPAD_LEFT; break; case 'R': b = SDL_CONTROLLER_BUTTON_DPAD_RIGHT; break;
+    case 'A': b = SDL_CONTROLLER_BUTTON_A; break; case 'B': b = SDL_CONTROLLER_BUTTON_B; break;
+    case 'X': b = SDL_CONTROLLER_BUTTON_X; break; case 'Y': b = SDL_CONTROLLER_BUTTON_Y; break;
+    case 'S': b = SDL_CONTROLLER_BUTTON_START; break; case 'V': b = SDL_CONTROLLER_BUTTON_BACK; break;
+    case 'l': b = SDL_CONTROLLER_BUTTON_LEFTSHOULDER; break; case 'r': b = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER; break;
+    case '>': hold_x = hold_x > 0 ? 0 : 1; SDL_JoystickSetVirtualAxis(j, SDL_CONTROLLER_AXIS_LEFTX, hold_x * 30000); break;
+    case '<': hold_x = hold_x < 0 ? 0 : -1; SDL_JoystickSetVirtualAxis(j, SDL_CONTROLLER_AXIS_LEFTX, hold_x * 30000); break;
+    case 'j': hold_t = !hold_t; SDL_JoystickSetVirtualAxis(j, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, hold_t ? 32767 : 0); break;
+    default: break;
+    }
+    if (b >= 0) { SDL_JoystickSetVirtualButton(j, b, 1); s_pad_release = b; }
+#endif
+}
+
 static uint16_t s_last_start = 0xFFFF;
 static void idle(void)                        /* called while the frame timer waits */
 {
@@ -114,6 +241,8 @@ static void dump_frame(void)
 static int g_esc_at = -1, g_fkey;
 static int frame_hook(int n)
 {
+    pad_script_step();
+    menu_flush();                                 /* menu keys pressed during play (A = Enter, B = Esc...) must not leak into the next menu */
     if (g_dump_at >= 0 && n == g_dump_at) { dump_frame(); g_quit = 1; }
     if (g_esc_at >= 0 && n == g_esc_at) { if (g_fkey == 10) g_in.f10 = 1; else if (g_fkey == 1) g_in.f1 = 1; else if (g_fkey == 22) g_in.hot_v = 1; else if (g_fkey == 2) g_in.f2 = 1; else g_in.esc = 1; }          /* --esc-at N (test): press Esc at frame N */
     return g_quit;
@@ -151,7 +280,7 @@ static void f_vol(void) { frontend_overlay_volume(); menu_flush(); input_reset()
 static void front_pace(void)        /* --keys "DDE.." scripted menu keys (U D E=enter X=esc, letters), one every 30 iterations; --frames N --dump: dump after N */
 {
     pump(); present(); SDL_Delay(g_dump_at >= 0 || s_script ? 1 : 16);
-    ++s_pace;
+    ++s_pace; pad_script_step();
     if (s_script && s_pace % 30 == 0 && *s_script) { char c = *s_script++; if (c >= 'a' && c <= 'z') tq_push(c); else if (c == '<') kq_push(FK_BKSP); else if (c == '+') kq_push(FK_RIGHT); else if (c == '-') kq_push(FK_LEFT); else kq_push(c == 'U' ? FK_UP : c == 'D' ? FK_DOWN : c == 'E' ? FK_ENTER : c == 'X' ? FK_ESC : c); }
     if (g_dump_at >= 0 && s_pace == g_dump_at) { dump_frame(); g_quit = 1; }
 }
@@ -181,6 +310,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--esc-at") && i + 1 < argc) g_esc_at = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--skip-intro")) g_skip_intro = 1;
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) s_script = argv[++i];
+        else if (!strcmp(argv[i], "--pad") && i + 1 < argc) s_pad_script = argv[++i];
         else if (!strcmp(argv[i], "--level") && i + 1 < argc) { level = atoi(argv[++i]); direct = 1; }
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) full = 1;
@@ -190,14 +320,16 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "usage: %s [--dat HOCUS.DAT] [--episode 0..3] [--level 0..8] [--scale N] [--fullscreen] [--frames N --dump out.ppm]\n", argv[0]); return 2; }
     }
     if (frames >= 0 && g_dump_file) g_dump_at = frames;
-    if (dat_open(dat)) { fprintf(stderr, "cannot open %s (copy the game's HOCUS.DAT next to the program or use --dat)\n", dat); return 1; }
+    if (dat_open(dat)) { char m[512]; snprintf(m, sizeof m, "Cannot open %s.\nCopy HOCUS.DAT from the registered Hocus Pocus v1.1 next to the program, or use --dat.", dat); fatal(m); return 1; }
+    { const char *err = dat_check(); if (err) { fatal(err); return 1; } }
     uint32_t n6; uint8_t *r6 = dat_load(6, &n6);
-    if (!r6 || rng_load(r6, n6)) { fprintf(stderr, "bad HOCUS.DAT (random table)\n"); return 1; }
+    if (!r6 || rng_load(r6, n6)) { fatal("Bad HOCUS.DAT (random table)."); return 1; }
     free(r6);
-    { uint32_t n; uint8_t *f = dat_load(0, &n); if (!f || n < 720) { fprintf(stderr, "bad HOCUS.DAT (font)\n"); return 1; } ui_set_font(f);   /* kept for the whole run */
-      uint8_t *t = dat_load(5, &n); if (!t || n < 2880) { fprintf(stderr, "bad HOCUS.DAT (star table)\n"); return 1; } stars_set_table(t); free(t); }
+    { uint32_t n; uint8_t *f = dat_load(0, &n); if (!f || n < 720) { fatal("Bad HOCUS.DAT (font)."); return 1; } ui_set_font(f);   /* kept for the whole run */
+      uint8_t *t = dat_load(5, &n); if (!t || n < 2880) { fatal("Bad HOCUS.DAT (star table)."); return 1; } stars_set_table(t); free(t); }
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO) < 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");   /* A = bottom face button on every pad (Nintendo layouts too) */
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
     g_win = SDL_CreateWindow("Hocus Pocus", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 320 * scale, 240 * scale,
                              SDL_WINDOW_RESIZABLE | (full ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     g_ren = g_win ? SDL_CreateRenderer(g_win, -1, SDL_RENDERER_PRESENTVSYNC) : NULL;
@@ -211,6 +343,7 @@ int main(int argc, char **argv)
       SDL_AudioDeviceID dev = g_audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);     /* no audio device (CI, headless): the game runs silent */
       sound_init(dev ? have.freq : 44100); music_init(dev ? have.freq : 44100);
       if (dev) { SDL_PauseAudioDevice(dev, 0); g_sound_on = 1; g_sound_hw = 1; game_set_sound_callback(play_sfx); g_loop_hooks.music = play_music; g_loop_hooks.music_off = stop_music; g_level_hooks.music = play_music; g_music_on = 1; } }
+    pad_open_first();                             /* later pads are picked up by SDL_CONTROLLERDEVICEADDED */
     input_init_defaults();
     { int hw = g_sound_hw; g_front.apply_volume = apply_volume; settings_load("HOCUS.SAV"); if (!hw) { g_sound_on = 0; g_music_on = 0; } }
     input_init_defaults(); input_reset();

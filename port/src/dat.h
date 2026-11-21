@@ -28,4 +28,5 @@ uint32_t  dat_size(int entry);                       /* 0 for a bad entry */
 uint32_t  dat_read(int entry, void *dest, uint32_t cap);
 /* read entry into a fresh malloc() buffer (free() it); NULL on error */
 uint8_t  *dat_load(int entry, uint32_t *size);
+const char *dat_check(void);                       /* NULL if the open file matches the built-in table, else an error message */
 #endif

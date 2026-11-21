@@ -536,7 +536,9 @@ void frontend_save(void)
 static void key_hint(void)
 {
     static const char h[] = "Press LETTER to select - ESC to exit";
-    if (g_front.img) g_front.img(9, 0, 0xB8); shadowed((320 - text_width(h)) / 2, 0xBC, 4, h); if (g_front.img) g_front.img(10, 0, 0);
+    if (g_front.img) g_front.img(9, 0, 0xB8);
+    shadowed((320 - text_width(h)) / 2, 0xBC, 4, h);
+    if (g_front.img) g_front.img(10, 0, 0);
 }
 static void pick_key(int action)                  /* 10AC: choose a key for one action from the 18 listed keys */
 {

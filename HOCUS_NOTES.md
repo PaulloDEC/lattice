@@ -555,3 +555,40 @@ Mutation test of `music.c`: 95/138 killed; the survivors are equivalent or untes
 * **Start-up** `0B97:0001`: PCX DAT 17 (piracy notice) for 15 s, PCX DAT 1 with music 0x257 for 9 s, then music 0x25A and PCX DAT 2 + IMG 3 at (0, 0xBC) (registered) with the digitised sound 0x263 for 4 s; any key skips a screen (`1392:0108(ms)`).  **Attract** `42CB`: after 4500 ticks (140 Hz) idle in the main menu show PCX DAT 0x17 and 0x18 (2.5 s each), redraw the menu; a second idle period returns 0x9D = demo `0548:0570`: episode 0, level (rand % 5) * 2, difficulty 1, `level_run(2, 0)` (demo data DAT 0x12 + level / 2).
 * **Sparkles** `06B8:0103` (init `039C`), called once per menu iteration: 75 points; table of 360 {x, y} = DAT 5 floats * 1e6 (truncated to long); position = (radius * tab / 1e6) + (160, 112) (signed 32-bit multiply / truncating divide); each step erases the old pixel when its colour is >= 0xF0, radius += speed (1..5), colour += step (1..5) capped at 0x7F, respawns (random angle 0..359, radius 0..159, until on screen; speed / step 1..5, colour 0) when outside the screen, draws colour 0xF0 + (colour >> 3) when the pixel is black; then waits for the retrace.
 * Test options of `main_sdl.c`: `--keys "..."` (U D E X = up, down, enter, esc; lower-case = typed text; `<` backspace, `+` `-` right / left; other upper-case letters = menu keys, one every 30 iterations), `--frames N --dump f.ppm`, `--esc-at N [--fkey 1|2|10|22]`, `--skip-intro`, `--test-screen endN|hs|demo|save|restore`.
+
+## 45. Startup DAT check and game controller support
+
+**DAT check** (`dat_check()` in dat.c, called right after `dat_open`): the FAT is compiled in from the Registered
+v1.1 EXE, so the file must be at least as long as the furthest entry end (the registered HOCUS.DAT is 6,101,525
+bytes), and entry 0x11 (the first start-up picture) must start with a PCX header (0x0A, version <= 5).  A shareware HOCUS.DAT
+fails the size test; before this check it was read at wrong offsets and crashed after the Apogee logo.
+Startup errors go to stderr *and* an SDL message box (`fatal()` in main_sdl.c), since a `-mwindows` build has
+no console.
+
+**Controller** (main_sdl.c, SDL GameController API, `SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS=0` so A is
+always the bottom face button).  The first connected pad is used; hot-plug is handled (removal releases everything).
+Pad inputs drive *virtual buttons*; a virtual button acts like a key: on press it bumps the key-press count
+(`s_keys`, for "press any key" screens), queues a menu key, and sends the DOS make code of the key currently
+**bound** to its action (so Define Keys still applies); on release the break code.  Several pad inputs can hold
+one virtual button (bitmask per button), so e.g. D-pad + stick don't fight.
+
+| Pad | Game | Menus |
+|---|---|---|
+| D-pad / left stick | move; up = doors/switches/wizards; down | navigate; left/right = volume sliders |
+| A, LT | jump (bound Jump key, default Ctrl) | select (Enter) |
+| X, RT | fire (bound Fire key, default Alt) | – |
+| B | fire | back (Esc) |
+| LB / RB, right stick up/down | look up / down (scroll keys) | page up / down |
+| Start | Esc: opens the in-game menu; again closes it | Esc |
+| Back / View | pause (P) | – |
+
+Stick dead zone: engage at 50% deflection, release under 35% (hysteresis); triggers engage at 50%, release at 25%.
+Menu keys queued during play are discarded every gameplay frame (`menu_flush()` in `frame_hook`), so A/B
+pressed in play can't auto-select in the next menu (this also applies to the keyboard).
+Not covered by the pad: typing a high-score name (use a keyboard, or the Steam Deck on-screen keyboard:
+Steam + X), the M/S/V/F-key hotkeys (all reachable from the Start menu), and Define Keys.
+
+Test option `--pad STR`: attaches an SDL virtual controller and presses one input per 30 ticks: `U D L R` D-pad,
+`A B X Y`, `S` Start, `V` Back, `l r` shoulders (each released on the next step); `>`/`<` toggle holding the left
+stick right/left, `j` toggles the right trigger, `.` waits.  E.g. `--episode 0 --level 0 --pad ">..A" --frames 133
+--dump f.ppm` (walk right and jump), `--skip-intro --pad ".DDDA"` (Instructions).
