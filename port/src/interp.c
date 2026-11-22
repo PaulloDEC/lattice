@@ -22,11 +22,12 @@ typedef struct {
 } Op;
 
 /* visible map cells at draw time (the tile pass runs after the draw, so the live map is a tick ahead) */
-#define SNAP_W 25
-#define SNAP_H 15
-#define SNAP_M 2                                  /* cells of margin around the 20 x 10 window */
+#define SNAP_ML 7                                 /* cells left of / above the original 20 x 10 window ... */
+#define SNAP_MT 5
+#define SNAP_W (SNAP_ML + 20 + 7)                 /* ... and right / below: wide view (+53 px a side) + blending */
+#define SNAP_H (SNAP_MT + 10 + 5)                 /*     HUD off (+20 px above and below) + blending */
 typedef struct {
-    int valid, nosmooth;
+    int valid, nosmooth, flash;                   /* flash: the play area is one colour (level_flash) */
     int cam_x, cam_row, cam_col, col_odd;
     uint32_t tick;                                /* timer_last() of the tick that drew it */
     int16_t cells[SNAP_W * SNAP_H];
@@ -47,6 +48,8 @@ static Frame *s_rec = &s_fr[2];                   /* where recording goes (bld, 
 static int s_armed, s_ready, s_on;
 static int s_runahead = 1, s_nahead, s_spec;      /* setting 0..2, ticks available, inside a run-ahead tick */
 static void *s_state;
+static int s_wide, s_hudoff;                      /* Enhanced views: 16:9 width, HUD off (full-height play area) */
+static int s_level_active;                         /* between a level's setup and the end of level_run */
 static int s_check, s_pred_n, s_pred_bad;         /* prediction check (tests) */
 static uint8_t s_pred_img[320 * 200]; static int s_pred_have;
 
@@ -87,20 +90,50 @@ static int live_cell(int cx, int cy)              /* layer1, else layer2, else -
     return -1;
 }
 
+#define WIDE_W 426                                /* 16:9 at the original's 1.2:1 pixels: 200 * 1.2 * 16 / 9 */
+#define MAP_PX_W (MAP_WIDTH * 16)
+#define MAP_PX_H (60 * 16)
+static int view_w(void) { return s_wide ? WIDE_W : 320; }
+static int play_h(void) { return s_hudoff ? 200 : 160; }
+/* how far the view's left (top) edge sits from the original screen's: centred, kept inside the map */
+static int view_shift(int cam, int extra, int map, int size)
+{
+    int l = cam - extra;
+    if (l > map - size) l = map - size;
+    if (l < 0) l = 0;
+    return l - cam;
+}
+static void set_view_ext(void)
+{
+    ViewExt e = { 0, 0, 0, 0 };
+    if (s_wide || s_hudoff) {
+        int W = view_w(), PH = play_h();
+        int sx = view_shift(g_cam.cam_x * 8, (W - 320) / 2, MAP_PX_W, W);
+        int sy = view_shift(g_cam.cam_row * 16, (PH - 160) / 2, MAP_PX_H, PH);
+        e.left = (int16_t)(sx < 0 ? -((-sx + 3) / 4) : 0);
+        e.right = (int16_t)((sx + W - 320 + 3) / 4);
+        e.top = (int16_t)sy;
+        e.bottom = (int16_t)(sy + PH - 160);
+    }
+    g_view_ext = e;
+}
+
 static void level_start(void)
 {
+    s_level_active = 1;
     prev->valid = cur->valid = bld->valid = ahead[0]->valid = ahead[1]->valid = 0;
     s_rec = bld; s_armed = 0; s_ready = 0; s_nahead = 0; s_pred_have = 0;
 }
 static void tick_begin(void)
 {
     Frame *f = s_rec;
-    f->valid = 1; f->nosmooth = g_lv.flash != 0; f->n = 0;
+    f->valid = 1; f->nosmooth = 0; f->flash = g_lv.flash != 0 ? 0x77 - g_lv.flash : -1; f->n = 0;
     f->cam_x = g_cam.cam_x; f->cam_row = g_cam.cam_row; f->cam_col = g_cam.cam_col; f->col_odd = g_cam.col_odd;
     f->tick = timer_last();
+    set_view_ext();
     for (int r = 0; r < SNAP_H; r++)
         for (int c = 0; c < SNAP_W; c++)
-            f->cells[r * SNAP_W + c] = (int16_t)live_cell(f->cam_col - SNAP_M + c, f->cam_row - SNAP_M + r);
+            f->cells[r * SNAP_W + c] = (int16_t)live_cell(f->cam_col - SNAP_ML + c, f->cam_row - SNAP_MT + r);
     f->tile_bytes = g_spr.page_off < VIDEO_PAGE_STRIDE ? g_spr.page_off : VIDEO_PAGE_STRIDE;
     for (int p = 0; p < 4; p++)
         for (uint16_t i = 0; i < f->tile_bytes; i++) f->tiles[p][i] = vga_plane(p)[(uint16_t)(g_spr.src_off + i)];
@@ -108,7 +141,7 @@ static void tick_begin(void)
 }
 static void tick_nosmooth(void) { if (s_armed) s_rec->nosmooth = 1; }
 
-static void render_pair(uint8_t *out, const Frame *A, const Frame *B, double a);
+static void render_pair(uint8_t *out, int W, int PH, const Frame *A, const Frame *B, double a);
 
 /* Run-ahead: save everything, run the next tick(s) silently with the input held now, recording them into
  * ahead[], restore everything.  level_run's own next tick then repeats the first of them for real; it only
@@ -136,7 +169,7 @@ static void run_ahead(void)
     state_restore(s_state);
     s_rec = bld; s_armed = 0;
     s_pred_have = 0;
-    if (s_check && s_nahead > 0 && !ahead[0]->nosmooth) { render_pair(s_pred_img, ahead[0], ahead[0], 1.0); s_pred_have = 1; }
+    if (s_check && s_nahead > 0 && !ahead[0]->nosmooth) { render_pair(s_pred_img, 320, 160, ahead[0], ahead[0], 1.0); s_pred_have = 1; }
 }
 /* the controls changed during the tick wait: predict again, so the picture reacts before the next tick */
 void interp_input_changed(void) { if (s_ready && s_on && s_runahead > 0 && cur->valid) run_ahead(); }
@@ -148,7 +181,7 @@ static void tick_shown(void)
         vga_render_indexed(cur->img);
         if (s_check && s_pred_have) {             /* does the tick match what was run ahead for it? */
             static uint8_t real[320 * 200];
-            render_pair(real, cur, cur, 1.0); s_pred_n++;
+            render_pair(real, 320, 160, cur, cur, 1.0); s_pred_n++;
             if (memcmp(real, s_pred_img, 320 * 160)) s_pred_bad++;
         }
         s_pred_have = 0;
@@ -157,12 +190,13 @@ static void tick_shown(void)
     s_ready = cur->valid;
 }
 static void tick_waited(void) { s_ready = 0; }
+static void level_end(void) { s_level_active = 0; s_ready = 0; }
 
 void interp_install(void)
 {
     g_rec_blit = rec_blit; g_rec_pixel = rec_pixel; g_rec_rect = rec_rect;
     g_loop_hooks.level_start = level_start; g_loop_hooks.tick_begin = tick_begin; g_loop_hooks.tick_nosmooth = tick_nosmooth;
-    g_loop_hooks.tick_shown = tick_shown; g_loop_hooks.tick_waited = tick_waited;
+    g_loop_hooks.tick_shown = tick_shown; g_loop_hooks.tick_waited = tick_waited; g_loop_hooks.level_end = level_end;
 }
 void interp_set_enabled(int on) { s_on = on != 0; timer_set_steady(s_on); }
 int interp_enabled(void) { return s_on; }
@@ -179,24 +213,27 @@ static double lerp(double a, double b, double t) { return a + (b - a) * t; }
 
 static int frame_cell(const Frame *f, int cx, int cy)
 {
-    int c = cx - (f->cam_col - SNAP_M), r = cy - (f->cam_row - SNAP_M);
+    int c = cx - (f->cam_col - SNAP_ML), r = cy - (f->cam_row - SNAP_MT);
     if (c >= 0 && c < SNAP_W && r >= 0 && r < SNAP_H) return f->cells[r * SNAP_W + c];
     return live_cell(cx, cy);
 }
 
-/* map + parallax backdrop for the play area; cmx / cmy = map camera in world pixels, bdx = backdrop origin */
-static void draw_world(uint8_t *out, const Frame *B, int cmx, int cmy, int bdx)
+/* map + parallax backdrop into the play area (W x PH, row stride W).  mx / my = world pixel at the view's top
+ * left; bdx = backdrop column at view x 0.  The backdrop is fixed to the screen (it never scrolls vertically),
+ * so a taller view (HUD off) stretches its 160 rows; horizontally it repeats every 320 pixels, as it does in
+ * the original. */
+static void draw_world(uint8_t *out, int W, int PH, const Frame *B, int mx, int my, int bdx)
 {
     const uint8_t *pl[4] = { vga_plane(0), vga_plane(1), vga_plane(2), vga_plane(3) };
     uint16_t tsrc = g_spr.src_off, bsrc = (uint16_t)(3 * VIDEO_PAGE_STRIDE + 0x7D0);
     bdx %= 320; if (bdx < 0) bdx += 320;
-    for (int Y = 0; Y < 160; Y++) {
-        int wy = cmy + Y, cy = wy >> 4, ty = wy & 15;
-        uint8_t *o = out + Y * 320;
+    for (int Y = 0; Y < PH; Y++) {
+        int wy = my + Y, cy = wy >> 4, ty = wy & 15, by = Y * 160 / PH;
+        uint8_t *o = out + Y * W;
         int X = 0;
-        while (X < 320) {
-            int wx = cmx + X, cx = wx >> 4, tx = wx & 15;
-            int span = 16 - tx; if (span > 320 - X) span = 320 - X;
+        while (X < W) {
+            int wx = mx + X, cx = wx >> 4, tx = wx & 15;
+            int span = 16 - tx; if (span > W - X) span = W - X;
             int t = frame_cell(B, cx, cy);
             if (t >= 0) {
                 uint16_t rel = (uint16_t)((t << 6) + ty * 4);
@@ -205,10 +242,9 @@ static void draw_world(uint8_t *out, const Frame *B, int cmx, int cmy, int bdx)
                 else
                     for (int k = 0; k < span; k++, tx++) o[X + k] = pl[tx & 3][(uint16_t)(tsrc + rel + (tx >> 2))];
             } else {
-                for (int k = 0; k < span; k++) {
-                    int bx = bdx + X + k; if (bx >= 320) bx -= 320;
-                    o[X + k] = pl[bx & 3][(uint16_t)(bsrc + Y * 80 + (bx >> 2))];
-                }
+                int bx = (bdx + X) % 320;
+                for (int k = 0; k < span; k++, bx = bx == 319 ? 0 : bx + 1)
+                    o[X + k] = pl[bx & 3][(uint16_t)(bsrc + by * 80 + (bx >> 2))];
             }
             X += span;
         }
@@ -216,7 +252,7 @@ static void draw_world(uint8_t *out, const Frame *B, int cmx, int cmy, int bdx)
 }
 
 /* sprite.c's blit() walk, drawing into the linear buffer shifted by (dxp, dyp) pixels, clipped to the play area */
-static void draw_sprite(uint8_t *out, const Op *op, int dxp, int dyp)
+static void draw_sprite(uint8_t *out, int W, int PH, const Op *op, int dxp, int dyp)
 {
     int16_t a0 = op->sheet, a1 = op->wrap, a2 = op->x, a3 = op->y, a4 = op->anim, a5 = op->frame;
     uint16_t idx = (uint16_t)(a0 * 110 + a4 * 20 + a5);
@@ -244,7 +280,7 @@ static void draw_sprite(uint8_t *out, const Op *op, int dxp, int dyp)
             for (int p = 0; p < 4; p++) {
                 if (!(mask >> p & 1)) continue;
                 int X = bx * 4 + p + dxp, Y = by + dyp;
-                if (X >= 0 && X < 320 && Y >= 0 && Y < 160) out[Y * 320 + X] = pl[p][sa];
+                if (X >= 0 && X < W && Y >= 0 && Y < PH) out[Y * W + X] = pl[p][sa];
             }
             if (mode == 0) src++;
             dst++;
@@ -253,10 +289,14 @@ static void draw_sprite(uint8_t *out, const Op *op, int dxp, int dyp)
     }
 }
 
-static void render_pair(uint8_t *out, const Frame *A, const Frame *B, double a)
+/* One picture: B (blended from A by a) into out, W x 200 (stride W): the play area is W x PH, below it the
+ * status panel of B's page, centred (the sides are left 0 and blacked out by the caller). */
+static void render_pair(uint8_t *out, int W, int PH, const Frame *A, const Frame *B, double a)
 {
-    const uint8_t *vgaimg = B->img;
-    memcpy(out, vgaimg, 320 * 200);
+    const uint8_t *img = B->img;
+    int ox = (W - 320) / 2;
+    memset(out, 0, (size_t)W * 200);
+    for (int y = PH; y < 200; y++) memcpy(out + y * W + ox, img + (y - PH + 160) * 320, 320);
 
     const Frame *p = A;
     int use_prev = p->valid && !p->nosmooth
@@ -270,7 +310,10 @@ static void render_pair(uint8_t *out, const Frame *A, const Frame *B, double a)
     int csy = iround(lerp(p->cam_row * 16.0, B->cam_row * 16.0, a));
     int cmx = iround(lerp(p->cam_col * 16.0 + p->col_odd * 8, B->cam_col * 16.0 + B->col_odd * 8, a));
     int bdx = iround(lerp(p->cam_x * 4.0, B->cam_x * 4.0, a));
-    draw_world(out, B, cmx, csy, bdx);
+    /* the view around the original screen: centred, kept inside the map */
+    int sxo = view_shift(cmx, ox, MAP_PX_W, W), syo = view_shift(csy, (PH - 160) / 2, MAP_PX_H, PH);
+    if (B->flash >= 0) memset(out, B->flash, (size_t)W * PH);       /* level_flash: one colour, sprites on top */
+    else draw_world(out, W, PH, B, cmx + sxo, csy + syo, bdx + sxo);
 
     /* previous tick's tagged objects, by (tag, occurrence) */
     static int pidx[MAX_TAG][MAX_OCC], cnt[MAX_TAG];
@@ -284,10 +327,12 @@ static void render_pair(uint8_t *out, const Frame *A, const Frame *B, double a)
 
     for (int i = 0; i < B->n; i++) {
         const Op *o = &B->ops[i];
-        if (o->kind == OP_RECT) {                 /* screen-fixed (boss bar): as drawn */
+        if (o->kind == OP_RECT) {                 /* screen-fixed (boss bar): as drawn, kept at the play area's foot */
             for (int y = o->y; y <= o->anim; y++)
-                for (int x = o->x; x <= o->wrap; x++)
-                    if (x >= 0 && x < 320 && y >= 0 && y < 160) out[y * 320 + x] = vgaimg[y * 320 + x];
+                for (int x = o->x; x <= o->wrap; x++) {
+                    int X = x + ox, Y = y + PH - 160;
+                    if (x >= 0 && x < 320 && y >= 0 && y < 160 && X < W && Y < PH) out[Y * W + X] = img[y * 320 + x];
+                }
             continue;
         }
         int px = o->kind == OP_SPR ? o->x * 4 : o->x;            /* screen pixels as drawn */
@@ -304,9 +349,9 @@ static void render_pair(uint8_t *out, const Frame *A, const Frame *B, double a)
                 }
             }
         }
-        int sx = iround(wx) - csx, sy = iround(wy) - csy;
-        if (o->kind == OP_SPR) draw_sprite(out, o, sx - px, sy - o->y);
-        else if (sx >= 0 && sx < 320 && sy >= 0 && sy < 160) out[sy * 320 + sx] = (uint8_t)o->frame;
+        int sx = iround(wx) - csx - sxo, sy = iround(wy) - csy - syo;
+        if (o->kind == OP_SPR) draw_sprite(out, W, PH, o, sx - px, sy - o->y);
+        else if (sx >= 0 && sx < W && sy >= 0 && sy < PH) out[sy * W + sx] = (uint8_t)o->frame;
     }
 }
 
@@ -320,25 +365,71 @@ static void pick_pair(const Frame **A, const Frame **B)
     else { *A = prev; *B = cur; }
 }
 
-int interp_render_at(uint8_t out[320 * 200], double a)
+#define OUT_MAXW WIDE_W
+static uint8_t s_idx[OUT_MAXW * 200];
+static uint8_t s_last[OUT_MAXW * 200]; static int s_last_w, s_last_ph;    /* last level picture (for the sides) */
+
+static void to_rgba(const uint8_t *idx, int W, int PH, int black_sides_from, uint32_t *rgba)
+{
+    vga_indexed_to_rgba_n(idx, W * 200, rgba);
+    int ox = (W - 320) / 2;
+    if (ox > 0)
+        for (int y = black_sides_from; y < 200; y++)
+            for (int x = 0; x < W; x++)
+                if (x < ox || x >= ox + 320) rgba[y * W + x] = 0xFF000000u;
+    (void)PH;
+}
+
+int interp_render_at(uint32_t *rgba, int *w, double a)
 {
     if (!s_ready || !cur->valid) return 0;
+    if (!s_on && !s_wide && !s_hudoff) return 0;                  /* Original: the VGA page itself */
     const Frame *A, *B; pick_pair(&A, &B);
+    if (!s_on) { A = cur; B = cur; a = 1; }
     if (!B->valid || B->nosmooth) return 0;
-    render_pair(out, A, B, a);
+    int W = view_w(), PH = play_h();
+    render_pair(s_idx, W, PH, A, B, a);
+    memcpy(s_last, s_idx, (size_t)W * 200); s_last_w = W; s_last_ph = PH;
+    to_rgba(s_idx, W, PH, PH, rgba);
+    *w = W;
     return 1;
 }
 int interp_render_latest(uint8_t out[320 * 200])
 {
     if (!s_ready || !cur->valid || cur->nosmooth) return 0;
-    render_pair(out, cur, cur, 1.0);
+    render_pair(out, 320, 160, cur, cur, 1.0);
     return 1;
 }
 
-int interp_render(uint8_t out[320 * 200])
+int interp_render(uint32_t *rgba, int *w)
 {
-    if (!s_on || !s_ready) return 0;
-    int interval = g_speed_interval[(g_game_speed >= 0 && g_game_speed <= 2) ? g_game_speed : 0];
-    double a = (timer_clock_frac() - (double)cur->tick) / interval;
-    return interp_render_at(out, a);
+    if (!s_ready) return 0;
+    double a = 1;
+    if (s_on) {
+        int interval = g_speed_interval[(g_game_speed >= 0 && g_game_speed <= 2) ? g_game_speed : 0];
+        a = (timer_clock_frac() - (double)cur->tick) / interval;
+    }
+    return interp_render_at(rgba, w, a);
 }
+
+/* The VGA page in an Enhanced view (menus, hint boxes, messages, fades, screens between levels): centred; while a
+ * level is running, the sides keep the last level picture (with the current palette, so fades apply), else black. */
+int interp_compose_vga(uint32_t *rgba, int *w, int keep_sides)
+{
+    int W = view_w();
+    if (W == 320) return 0;
+    int ox = (W - 320) / 2;
+    static uint8_t vga[320 * 200];
+    vga_render_indexed(vga);
+    int sides = keep_sides && s_level_active && s_last_w == W;
+    if (sides) memcpy(s_idx, s_last, (size_t)W * 200); else memset(s_idx, 0, (size_t)W * 200);
+    for (int y = 0; y < 200; y++) memcpy(s_idx + y * W + ox, vga + y * 320, 320);
+    to_rgba(s_idx, W, 200, sides ? (s_last_ph < 200 ? s_last_ph : 200) : 0, rgba);
+    *w = W;
+    return 1;
+}
+
+void interp_set_view(int wide, int hud_off) { s_wide = wide != 0; s_hudoff = hud_off != 0; s_last_w = 0; set_view_ext(); }
+int interp_wide(void) { return s_wide; }
+int interp_hud_off(void) { return s_hudoff; }
+int interp_view_width(void) { return view_w(); }

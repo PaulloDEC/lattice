@@ -1,5 +1,6 @@
 #include "effects.h"
 #include "sprite.h"
+#include "camera.h"
 #include "rng.h"
 #include "video.h"
 #include "vga.h"
@@ -123,6 +124,12 @@ void fx_update_sparkles(void)
                 vga_write(off, color);
                 if (g_rec_pixel) g_rec_pixel(g_fx.d_x[i] * 4 + (plane & 3), g_fx.d_y[i], color, 0);
             }
+        } else if (g_rec_pixel && g_fx.d_x[i] >= g_view_ext.left && g_fx.d_x[i] < 0x50 + g_view_ext.right &&
+                   g_fx.d_y[i] >= g_view_ext.top && g_fx.d_y[i] < 0xA0 + g_view_ext.bottom) {
+            /* beyond the original screen, in an Enhanced view: drawn only, with its own pattern instead of the
+             * game's random numbers (which must be used exactly as the original does) */
+            int k = g_fx.d_t[i] + i * 7 + g_fx.d_y[i];
+            if (k & 1) g_rec_pixel(g_fx.d_x[i] * 4 + ((k >> 1) & 3), g_fx.d_y[i], (uint8_t)(g_fx.d_t[i] / 4 + 0x78), 0);
         }
         g_fx.d_y[i]++;
         g_fx.d_t[i]++;
@@ -165,8 +172,10 @@ void fx_update_bursts(void)
                 video_set_map_mask((uint8_t)(1u << (x % 4)));
                 vga_write((uint16_t)(video_draw_offset() + (uint16_t)(y * 80) + (x >> 2)),
                           (uint8_t)g_fx.a_vel[b][p][2]);
-                if (g_rec_pixel) g_rec_pixel(x, y, (uint8_t)g_fx.a_vel[b][p][2], TAG_BURST + b * 16 + p);
             }
+            if (g_rec_pixel && x >= g_view_ext.left * 4 && x < 0x140 + g_view_ext.right * 4 &&
+                y >= g_view_ext.top && y < 0xA0 + g_view_ext.bottom)     /* recorded across an Enhanced view too */
+                g_rec_pixel(x, y, (uint8_t)g_fx.a_vel[b][p][2], TAG_BURST + b * 16 + p);
         }
         g_fx.a_flags[b] = (int8_t)(g_fx.a_flags[b] - 1);
     }

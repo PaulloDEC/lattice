@@ -1,5 +1,7 @@
 #include "camera.h"
 
+ViewExt g_view_ext;
+
 Camera g_cam;
 
 /* All arithmetic is 16-bit like the original (int16 stores, signed divisions truncate to zero). */

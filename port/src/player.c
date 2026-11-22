@@ -65,7 +65,8 @@ void projectiles_update(void)
         int16_t sx = I16(g_proj.x[i] - (g_cam.cam_x << 1));
         int16_t sy = I16(g_proj.y[i] - (g_cam.cam_row << 4));
         int off = 0;
-        if (sx < -10 || sx > 0x50 || sy < -0x14 || sy > 0xA0) off = 1;
+        if (sx < -10 + g_view_ext.left || sx > 0x50 + g_view_ext.right ||
+            sy < -0x14 + g_view_ext.top || sy > 0xA0 + g_view_ext.bottom) off = 1;
         int row = g_proj.y[i] / 16, col = g_proj.x[i] / 4;          /* signed, truncating */
         int idx = row * 240 + col;
         if (g_map.fg && idx >= 0 && idx < 240 * 60 && g_map.fg[idx] != 0xFF) off = 2;

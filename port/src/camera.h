@@ -27,6 +27,12 @@ typedef struct Camera {
     int16_t snap;          /* CF38  non-zero: camera X snaps to the player instead of easing      */
 } Camera;
 
+/* Enhanced views (wide / HUD off, port only): how far the visible view reaches past the original 320x160
+ * screen this tick - left / right in 4-px byte columns (left <= 0), top / bottom in pixels (top <= 0).
+ * All zero (the default) = the original screen, and every original bound is unchanged. */
+typedef struct ViewExt { int16_t left, right, top, bottom; } ViewExt;
+extern ViewExt g_view_ext;
+
 extern Camera g_cam;
 /* One frame of camera update.  Also shifts the world-anchored effect positions in g_fx so they
  * stay put while the camera moves (burst/score/puff/sparkle positions, shot Y). */

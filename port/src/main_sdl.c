@@ -7,7 +7,8 @@
  *   Keys: arrows move, Ctrl jump, Alt fire (the game's own defaults), P pause, M / S music / sound, Esc menu.
  *   Game controller: see the controller section below (D-pad/stick move, A jump, X/B fire, Start menu).
  *   Smoothing (Enhanced display interpolation, interp.c): F11 or right stick click toggles; --smooth starts with it on.
- *   Run-ahead (default 1): F12 or left stick click cycles 0 / 1 / 2; --runahead N.
+ *   Run-ahead (default 1): F12 cycles 0 / 1 / 2; --runahead N.
+ *   Views: F7 wide 16:9 on / off (--wide), F8 HUD on / off (--hud-off), left stick click cycles the four.
  *   Tests: --smooth-check (smooth picture at each tick == VGA page), --dump-alpha A (with --frames N --dump f.ppm).
  */
 #include <SDL.h>
@@ -34,7 +35,9 @@
 
 static SDL_Window *g_win; static SDL_Renderer *g_ren; static SDL_Texture *g_tex;
 static int g_quit, g_dump_at = -1; static const char *g_dump_file; static double s_dump_alpha = -1;
-static uint32_t g_pix[320 * 200];
+static int s_menu_screen;                         /* a front-end screen is up (menus, help...): black sides in wide */
+static uint32_t g_pix[432 * 200];               /* the presented picture, s_pix_w x 200 (320, or 426 wide) */
+static int s_pix_w = 320;
 
 /* SDL scancode -> DOS set-1 make code (0 = unmapped).  Extended keys use their plain code, as the game's key table does. */
 static uint8_t dos_scancode(SDL_Scancode s)
@@ -62,7 +65,7 @@ static void fatal(const char *msg)               /* stderr is invisible in a Win
 
 static uint32_t s_notice_until; static const char *s_notice;
 static void notice(const char *t) { s_notice = t; s_notice_until = SDL_GetTicks() + 1200; }
-static void draw_notice(uint32_t *pix)           /* small white text with a shadow, top left; drawn over the output only */
+static void draw_notice(uint32_t *pix, int w)    /* small white text with a shadow, top left; drawn over the output only */
 {
     const uint8_t *f = ui_font();
     if (!s_notice || !f || SDL_TICKS_PASSED(SDL_GetTicks(), s_notice_until)) return;
@@ -74,7 +77,7 @@ static void draw_notice(uint32_t *pix)           /* small white text with a shad
             if (c == ' ') { x += 4; continue; }
             if (c < 0x21 || c > 0x7A) continue;
             int g = c - 0x21, m = 0;
-            for (int r = 0; r < 8; r++) for (int i = 0; i < 8; i++) if (f[g * 8 + r] >> i & 1) { if (i > m) m = i; if (x + i >= 0 && x + i < 320 && y + r < 200) pix[(y + r) * 320 + x + i] = col; }
+            for (int r = 0; r < 8; r++) for (int i = 0; i < 8; i++) if (f[g * 8 + r] >> i & 1) { if (i > m) m = i; if (x + i >= 0 && x + i < w && y + r < 200) pix[(y + r) * w + x + i] = col; }
             x += m + 2;
         }
     }
@@ -86,7 +89,21 @@ static void smooth_notice(void)
     if (!interp_enabled()) notice("SMOOTH: OFF");
     else { snprintf(s_notice_buf, sizeof s_notice_buf, "SMOOTH: DISPLAY  RUN-AHEAD %d", interp_runahead()); notice(s_notice_buf); }
 }
-static void cycle_runahead(void)                  /* F12 / left stick click: 0 -> 1 -> 2 -> 0 (turns smoothing on) */
+static char s_view_buf[48];
+static void view_notice(void)
+{
+    snprintf(s_view_buf, sizeof s_view_buf, "VIEW: %s  HUD: %s", interp_wide() ? "WIDE 16:9" : "CLASSIC", interp_hud_off() ? "OFF" : "CLASSIC");
+    notice(s_view_buf);
+}
+static void toggle_wide(void) { interp_set_view(!interp_wide(), interp_hud_off()); view_notice(); }      /* F7 */
+static void toggle_hud(void)  { interp_set_view(interp_wide(), !interp_hud_off()); view_notice(); }      /* F8 */
+static void cycle_view(void)                      /* left stick click: classic -> wide -> wide, HUD off -> HUD off -> classic */
+{
+    int w = interp_wide(), h = interp_hud_off();
+    if (!w && !h) w = 1; else if (w && !h) h = 1; else if (w && h) w = 0; else h = 0;
+    interp_set_view(w, h); view_notice();
+}
+static void cycle_runahead(void)                  /* F12: 0 -> 1 -> 2 -> 0 (turns smoothing on) */
 {
     if (!interp_enabled()) interp_set_enabled(1);
     else interp_set_runahead((interp_runahead() + 1) % 3);
@@ -98,16 +115,35 @@ static void toggle_smooth(void)
     smooth_notice();
 }
 
+static int compose(void)                          /* the picture to show into g_pix; returns its width */
+{
+    int w = 320;
+    if (interp_render(g_pix, &w) || interp_compose_vga(g_pix, &w, !s_menu_screen)) return w;
+    vga_render_rgba(g_pix);
+    return 320;
+}
+static int s_tex_w;
+static void set_tex_width(int w)                  /* texture w x 200 shown at w x 240 (200 rows stretched, as on a CRT) */
+{
+    if (w == s_tex_w && g_tex) return;
+    if (g_tex) SDL_DestroyTexture(g_tex);
+    g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, w, 200);
+    SDL_RenderSetLogicalSize(g_ren, w, 240);
+    if (s_tex_w && !(SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP)) {    /* windowed: keep the height */
+        int ww, wh; SDL_GetWindowSize(g_win, &ww, &wh);
+        SDL_SetWindowSize(g_win, wh * w / 240, wh);
+    }
+    s_tex_w = w;
+}
 static void present(void)
 {
     if (!g_ren) return;
-    static uint8_t idx[320 * 200];
-    if (!interp_render(idx)) vga_render_indexed(idx);
-    vga_indexed_to_rgba(idx, g_pix);
-    draw_notice(g_pix);
-    SDL_UpdateTexture(g_tex, NULL, g_pix, 320 * 4);
+    int w = s_pix_w = compose();
+    set_tex_width(w);
+    draw_notice(g_pix, w);
+    SDL_UpdateTexture(g_tex, NULL, g_pix, w * 4);
     SDL_RenderClear(g_ren);
-    SDL_RenderCopy(g_ren, g_tex, NULL, NULL);      /* logical size 320x240: 200 rows stretched to 4:3, as on a CRT */
+    SDL_RenderCopy(g_ren, g_tex, NULL, NULL);
     SDL_RenderPresent(g_ren);
 }
 
@@ -122,7 +158,7 @@ static void menu_flush(void) { s_kqn = 0; s_tqn = 0; }
 static void pad_open_first(void); static void pad_release_all(void); static void pad_button(int b, int down); static void pad_axis(int a, int v);
 static SDL_GameController *s_pad;
 static void pad_script_step(void);
-static void toggle_smooth(void); static void cycle_runahead(void);
+static void toggle_smooth(void); static void cycle_runahead(void); static void toggle_wide(void); static void toggle_hud(void); static void cycle_view(void);
 
 /* Tap latching (with smoothing on): a key pressed and released between two ticks would never be seen by the
  * game (the original reads key states once per tick).  Its release is held back until the next tick has run. */
@@ -167,6 +203,10 @@ static void pump(void)
             }
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11) { toggle_smooth(); continue; }
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F12) { cycle_runahead(); continue; }
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F7) { toggle_wide(); continue; }
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F8) { toggle_hud(); continue; }
+            if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && (e.key.keysym.scancode == SDL_SCANCODE_F7 || e.key.keysym.scancode == SDL_SCANCODE_F8 ||
+                e.key.keysym.scancode == SDL_SCANCODE_F11 || e.key.keysym.scancode == SDL_SCANCODE_F12)) continue;    /* port keys: never seen by the game */
             if (e.type == SDL_KEYDOWN && sc && s_keys < 16) s_keys++;
             if (e.type == SDL_KEYDOWN) {
                 SDL_Keycode k = e.key.keysym.sym;
@@ -236,7 +276,7 @@ static void pad_button(int b, int down)
     case SDL_CONTROLLER_BUTTON_START:      vb_set(VB_START, b, down); break;
     case SDL_CONTROLLER_BUTTON_BACK:       vb_set(VB_PAUSE, b, down); break;
     case SDL_CONTROLLER_BUTTON_RIGHTSTICK: if (down) toggle_smooth(); break;    /* R3: smoothing on / off */
-    case SDL_CONTROLLER_BUTTON_LEFTSTICK:  if (down) cycle_runahead(); break;   /* L3: run-ahead 0 / 1 / 2 */
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK:  if (down) cycle_view(); break;       /* L3: classic / wide / wide + HUD off / HUD off */
     default: break;
     }
 }
@@ -318,7 +358,8 @@ static int s_frames_left = -1;
 static void dump_frame(void)
 {
     FILE *f = fopen(g_dump_file, "wb");
-    if (f) { fprintf(f, "P6\n320 200\n255\n"); vga_render_rgba(g_pix); for (int i = 0; i < 320 * 200; i++) { fputc(g_pix[i] & 255, f); fputc((g_pix[i] >> 8) & 255, f); fputc((g_pix[i] >> 16) & 255, f); } fclose(f); }
+    int w = compose();                            /* what would be shown (the VGA page in the Original setup) */
+    if (f) { fprintf(f, "P6\n%d 200\n255\n", w); for (int i = 0; i < w * 200; i++) { fputc(g_pix[i] & 255, f); fputc((g_pix[i] >> 8) & 255, f); fputc((g_pix[i] >> 16) & 255, f); } fclose(f); }
 }
 static int g_esc_at = -1, g_fkey;
 static int frame_hook(int n)
@@ -361,6 +402,7 @@ static int  f_quit(void) { int r = frontend_overlay_quit(); menu_flush(); input_
 static void f_vol(void) { frontend_overlay_volume(); menu_flush(); input_reset(); }
 static void front_pace(void)        /* --keys "DDE.." scripted menu keys (U D E=enter X=esc, letters), one every 30 iterations; --frames N --dump: dump after N */
 {
+    s_menu_screen = 1;                                /* until the next level tick */
     pump(); present(); SDL_Delay(g_dump_at >= 0 || s_script ? 1 : 16);
     ++s_pace; pad_script_step();
     if (s_script && s_pace % 30 == 0 && *s_script) { char c = *s_script++; if (c >= 'a' && c <= 'z') tq_push(c); else if (c == '<') kq_push(FK_BKSP); else if (c == '+') kq_push(FK_RIGHT); else if (c == '-') kq_push(FK_LEFT); else kq_push(c == 'U' ? FK_UP : c == 'D' ? FK_DOWN : c == 'E' ? FK_ENTER : c == 'X' ? FK_ESC : c); }
@@ -395,15 +437,19 @@ static void dump_indexed(const uint8_t *idx)
 }
 static void dump_pending(void)                   /* --dump-alpha: the smooth picture once this wait's input is in */
 {
-    static uint8_t a[320 * 200];
     if (!s_dump_pending) return;
     s_dump_pending = 0;
-    if (interp_render_at(a, s_dump_alpha)) dump_indexed(a); else dump_frame();
+    int w = 320;
+    if (interp_render_at(g_pix, &w, s_dump_alpha)) {
+        FILE *f = fopen(g_dump_file, "wb");
+        if (f) { fprintf(f, "P6\n%d 200\n255\n", w); for (int i = 0; i < w * 200; i++) { fputc(g_pix[i] & 255, f); fputc((g_pix[i] >> 8) & 255, f); fputc((g_pix[i] >> 16) & 255, f); } fclose(f); }
+    } else dump_frame();
     g_quit = 1;
 }
 static void tick_shown_main(void)
 {
     tap_flush();                                     /* the tick that just ran has seen every tap; also before run-ahead */
+    s_menu_screen = 0;
     s_tick_shown_inner();
     ++s_shown;
     static uint8_t a[320 * 200], b[320 * 200];
@@ -432,7 +478,7 @@ static void tick_shown_main(void)
 
 int main(int argc, char **argv)
 {
-    int smooth = 0, runahead = 1;
+    int smooth = 0, runahead = 1, wide = 0, hudoff = 0;
     const char *dat = "HOCUS.DAT"; int episode = 0, level = 0, scale = 3, full = 0, frames = -1, end_test = -1, direct = 0; const char *test_screen = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dat") && i + 1 < argc) dat = argv[++i];
@@ -444,6 +490,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) s_script = argv[++i];
         else if (!strcmp(argv[i], "--pad") && i + 1 < argc) s_pad_script = argv[++i];
         else if (!strcmp(argv[i], "--smooth")) smooth = 1;
+        else if (!strcmp(argv[i], "--wide")) wide = 1;
+        else if (!strcmp(argv[i], "--hud-off")) hudoff = 1;
         else if (!strcmp(argv[i], "--runahead") && i + 1 < argc) runahead = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--smooth-check")) s_check = 1;
         else if (!strcmp(argv[i], "--frame-hash") && i + 1 < argc) s_hash_f = fopen(argv[++i], "w");
@@ -454,7 +502,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--end") && i + 1 < argc) end_test = atoi(argv[++i]);   /* show the end screen once (0 = died, 1 = finished) */
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) g_dump_file = argv[++i];
-        else { fprintf(stderr, "usage: %s [--dat HOCUS.DAT] [--episode 0..3] [--level 0..8] [--scale N] [--fullscreen] [--smooth] [--runahead 0..2] [--frames N --dump out.ppm]\n", argv[0]); return 2; }
+        else { fprintf(stderr, "usage: %s [--dat HOCUS.DAT] [--episode 0..3] [--level 0..8] [--scale N] [--fullscreen] [--smooth] [--runahead 0..2] [--wide] [--hud-off] [--frames N --dump out.ppm]\n", argv[0]); return 2; }
     }
     if (frames >= 0 && g_dump_file) g_dump_at = frames;
     if (dat_open(dat)) { char m[512]; snprintf(m, sizeof m, "Cannot open %s.\nCopy HOCUS.DAT from the registered Hocus Pocus v1.1 next to the program, or use --dat.", dat); fatal(m); return 1; }
@@ -467,13 +515,12 @@ int main(int argc, char **argv)
 
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");   /* A = bottom face button on every pad (Nintendo layouts too) */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
-    g_win = SDL_CreateWindow("Hocus Pocus", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 320 * scale, 240 * scale,
+    g_win = SDL_CreateWindow("Hocus Pocus", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (wide ? 426 : 320) * scale, 240 * scale,
                              SDL_WINDOW_RESIZABLE | (full ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     g_ren = g_win ? SDL_CreateRenderer(g_win, -1, SDL_RENDERER_PRESENTVSYNC) : NULL;
     if (!g_ren && g_win) g_ren = SDL_CreateRenderer(g_win, -1, 0);
     if (!g_ren) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
-    SDL_RenderSetLogicalSize(g_ren, 320, 240);
-    g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 320, 200);
+    s_tex_w = 0; set_tex_width(wide ? 426 : 320);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
 
     { SDL_AudioSpec want, have; SDL_zero(want); want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 1; want.samples = 1024; want.callback = audio_cb;
@@ -492,7 +539,7 @@ int main(int argc, char **argv)
     g_loop_hooks.message = ui_message; g_loop_hooks.palette_entry = pal_entry;
     rng_set_index(0); stars_init();
     g_loop_hooks.frame = frame_hook; g_loop_hooks.quit_menu = quit_menu; g_loop_hooks.menu_f1 = f_help; g_loop_hooks.menu_f2 = f_save; g_loop_hooks.menu_f3 = f_load; g_loop_hooks.menu_f10 = f_quit; g_loop_hooks.menu_v = f_vol; g_loop_hooks.pause_game = pause_game; g_loop_hooks.end_screen = end_screen; g_loop_hooks.wait_key = wait_key;
-    interp_install(); interp_set_enabled(smooth); interp_set_runahead(runahead); interp_set_check(s_check);
+    interp_install(); interp_set_view(wide, hudoff); interp_set_enabled(smooth); interp_set_runahead(runahead); interp_set_check(s_check);
     s_tick_shown_inner = g_loop_hooks.tick_shown; g_loop_hooks.tick_shown = tick_shown_main;
     g_difficulty = 1; g_game_speed = 0; g_joy_enabled = 0; g_lv.mana = 1;
     g_episode = (int16_t)episode; g_lv.level_icon = (int16_t)level;

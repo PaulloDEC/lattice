@@ -31,7 +31,7 @@ static void add(void *p, size_t n) { if (s_nreg < MAX_REGIONS) { s_reg[s_nreg].p
 static void init(void)
 {
     if (s_nreg) return;
-    ADD(g_cam);
+    ADD(g_cam); ADD(g_view_ext);
     ADD(g_fx);
     ADD(g_en); ADD(g_shots); ADD(g_enemy_sound_deadline); ADD(g_boss_phase); ADD(g_kills); ADD(g_enemy_fire_chance); ADD(g_difficulty);
     ADD(g_mv); ADD(g_joy); ADD(g_frame); ADD(g_shot_block_tile); ADD(g_demo_playback);

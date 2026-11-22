@@ -106,7 +106,7 @@ void shots_update(void)
             if (fg_rd(di) != 0xFF) { fx_spawn_burst(x * 4 + 8, y + 2); shot_free(s); continue; }
             g_fx.e_y[s] = (int16_t)(y - 0x10);
             y = g_fx.e_y[s];
-            if (x > 0x4F || y < 0) { shot_free(s); continue; }
+            if (x > 0x4F + g_view_ext.right || y < g_view_ext.top) { shot_free(s); continue; }
             g_rec_tag = TAG_SHOT + s;
             fx_draw(0, (int16_t)g_spr.hdr[0][23], x, y, g_shots.dir[s],
                     (int16_t)(g_spr.hdr[0][26] + (g_shots.power[s] ? 3 : 1)));
@@ -122,7 +122,7 @@ void shots_update(void)
             if (shot_tile_hit(s, di + 0xF1, x + 6 - c2, y + 8)) continue;
             if (fg_rd(di) != 0xFF || fg_rd(di + 1) != 0xFF) { fx_spawn_burst(x * 4 + 0x18, y + 0xA); shot_free(s); continue; }
             x += 4; g_shots.x[s] = (int16_t)x;
-            if (x > 0x4F || y < 0) { shot_free(s); continue; }
+            if (x > 0x4F + g_view_ext.right || y < g_view_ext.top) { shot_free(s); continue; }
             g_rec_tag = TAG_SHOT + s;
             fx_draw(0, (int16_t)g_spr.hdr[0][23], x, y, g_shots.dir[s],
                     (int16_t)(g_spr.hdr[0][26] + (g_shots.power[s] ? 2 : 0)));
@@ -135,7 +135,7 @@ void shots_update(void)
             if (shot_tile_hit(s, di + 0xEF, x - 2 - c2, y + 8)) continue;
             if (fg_rd(di - 1) != 0xFF || fg_rd(di) != 0xFF) { fx_spawn_burst(x * 4 + 1, y + 2); shot_free(s); continue; }
             x -= 4; g_shots.x[s] = (int16_t)x;
-            if (x < -3 || y < 0) { shot_free(s); continue; }
+            if (x < -3 + g_view_ext.left || y < g_view_ext.top) { shot_free(s); continue; }
             g_rec_tag = TAG_SHOT + s;
             fx_draw(0, (int16_t)g_spr.hdr[0][23], x, y, g_shots.dir[s],
                     (int16_t)(g_spr.hdr[0][26] + (g_shots.power[s] ? 2 : 0)));

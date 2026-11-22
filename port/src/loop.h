@@ -31,6 +31,7 @@ typedef struct LoopHooks {
     int  (*frame)(int n);                  /* top of every frame (original 0BA5:4D47); a non-zero result aborts level_run with -2 (tests, window close) */
     /* Enhanced display smoothing (port only, NULL = nothing): */
     void (*level_start)(void);             /* after every level setup (new level, restart, load) */
+    void (*level_end)(void);               /* level_run is returning */
     void (*tick_begin)(void);              /* the frame's drawing starts (camera updated, before the world draw) */
     void (*tick_nosmooth)(void);           /* this frame must be shown as drawn (pause screen drawn into it) */
     void (*tick_shown)(void);              /* the finished frame was just shown; the tick wait follows */

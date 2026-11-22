@@ -695,3 +695,47 @@ has run (`tap_flush()` at `tick_shown`, and whenever no level is waiting).  Keyb
   it Hocus jumps.
 * `--dump-alpha` now captures in the tick wait after the input has been read (closer to real play).
 * `tests/diff_run.py all` (Original mode vs the DOS game): still 72 runs, 0 mismatches.
+
+## 48. Enhanced views: 16:9 wide and HUD off (groundwork)
+
+**Keys:** **F7** wide on / off, **F8** HUD on / off, **left stick click (L3)** cycles classic -> wide -> wide + HUD
+off -> HUD off -> classic (run-ahead cycling moved to F12 only).  `--wide`, `--hud-off`.  F7 / F8 / F11 / F12
+never reach the game (so they can't disturb the cheat-code key sums).  Notice: "VIEW: WIDE 16:9  HUD: OFF".
+
+**Geometry:** wide = **426 x 200** (16:9 with the original's 1.2:1 pixels: 200 x 1.2 x 16 / 9), shown at
+426 x 240 like the 320 x 200 picture is shown at 320 x 240.  The texture is recreated on a width change and a
+windowed window keeps its height.  HUD off = the play area fills all 200 rows.  The view is centred on the
+original screen (wide: +53 px a side; HUD off: +20 px above and below) and kept inside the 3840 x 960 map, so at
+a map edge it extends to one side only.  Classic + HUD + smoothing off = the VGA page, exactly as before.
+
+**Rendering** (interp.c `render_pair(out, W, PH, ...)`): the redraw of section 46 at any width / play height.
+Map cells come from a larger per-tick snapshot (7 cells left / right, 5 above / below).  The backdrop repeats every
+320 px horizontally (as the original's wrap does); it is fixed to the screen, so with HUD off its 160 rows are
+stretched to 200 (nearest).  Wide without smoothing shows the latest tick redrawn (no blending).  The status panel
+(rows 160..199 of the page) is centred with black sides; the boss bar keeps its place at the play area's foot,
+centred.  `level_flash` frames are now redrawn as one colour with the sprites on top.
+**When the VGA page must be shown** in a wide view (`interp_compose_vga`): centred; for overlays on the play area
+(hint boxes, status messages, pause - anything not through the front end's pace hook) the sides keep the last level
+picture, converted with the current palette so fades apply; for menus and front-end screens (`s_menu_screen`, set by
+`front_pace`, cleared at the next level tick) and outside a level (new `level_end` hook: `level_run` is now a
+wrapper around `level_run_body`) they are black.
+
+**Gameplay bounds** (`g_view_ext` in camera.[ch]; set each tick in `tick_begin` from the camera and the view;
+all zero in the classic view, so the original is unchanged):
+* player shots are freed at the view's edge instead of the original screen's (`frame.c`: `x > 0x4F + right`,
+  `x < -3 + left`, `y < top`);
+* enemy projectiles likewise (`player.c`: `-10 + left`, `0x50 + right`, `-0x14 + top`, `0xA0 + bottom`).
+  So shots reach further and enemies in the extra view can hit you with projectiles - a deliberate Enhanced change;
+  without it shots and projectiles would visibly vanish 53 px short of the edge.
+* spark bursts are recorded across the view (VGA writes stay inside the original screen); falling sparkles outside
+  the original screen are drawn with their own pattern, never the game's random numbers, so randomness is unchanged.
+* Enemies needed nothing: they stay alive up to ~200 px (left) / 160 px (right) beyond the original screen, are drawn
+  while alive, and appear through trigger tiles, not at screen edges.
+
+**Checks:** classic `--smooth-check`: 598 ticks, 0 differences, 0 mispredictions.  Wide + HUD off: run-ahead 1
+identical to run-ahead 0 by `--frame-hash` (E1L2, E2L4).  Shots fly on past the original edge to the wide edge
+(E1L2).  `tests/diff_run.py all`: 72 runs, 0 mismatches.  `--dump` and `--dump-alpha` write the picture as shown
+(426 wide in the wide view).
+
+**Open (for later):** wider HUD art; HUD Off needs some status display (health / score) eventually; a wider view can
+show parts of levels the designers never expected to be seen together (no problem spotted on the levels looked at).

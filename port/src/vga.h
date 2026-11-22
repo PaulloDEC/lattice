@@ -39,7 +39,8 @@ void    vga_render_indexed(uint8_t out[320 * 200]);
 void    vga_render_rgba(uint32_t out[320 * 200]);    /* 0xAABBGGRR little-endian bytes R,G,B,A */
 void    vga_render_indexed_at(uint16_t start, uint8_t out[320 * 200]);   /* any page, ignoring screen-off */
 uint8_t vga_palette(int index, int component);       /* DAC entry, 6-bit r / g / b */
-void    vga_indexed_to_rgba(const uint8_t idx[320 * 200], uint32_t out[320 * 200]);   /* with the DAC palette (and screen-off) */
+void    vga_indexed_to_rgba(const uint8_t idx[320 * 200], uint32_t out[320 * 200]);
+void    vga_indexed_to_rgba_n(const uint8_t *idx, int n, uint32_t *out);   /* with the DAC palette (and screen-off) */
 
 /* test/debug access */
 const uint8_t *vga_plane(int p);

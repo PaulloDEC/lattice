@@ -68,7 +68,7 @@ void level_tick_ahead(void)
     player_move(mode);
 }
 
-int level_run(int mode, int pause)
+static int level_run_body(int mode, int pause)
 {
     s_run_mode = mode;
     int ret = 0;                       /* bp-8 */
@@ -187,4 +187,12 @@ int level_run(int mode, int pause)
         return ret;
     restart: ;
     }
+}
+
+/* level_run: the original loop, plus the port's level_end hook */
+int level_run(int mode, int pause)
+{
+    int r = level_run_body(mode, pause);
+    if (HK(level_end)) HK(level_end)();
+    return r;
 }

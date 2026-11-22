@@ -62,9 +62,10 @@ void vga_render_rgba(uint32_t out[320 * 200])
     vga_render_indexed(idx);
     vga_indexed_to_rgba(idx, out);
 }
-void vga_indexed_to_rgba(const uint8_t idx[320 * 200], uint32_t out[320 * 200])
+void vga_indexed_to_rgba(const uint8_t idx[320 * 200], uint32_t out[320 * 200]) { vga_indexed_to_rgba_n(idx, 320 * 200, out); }
+void vga_indexed_to_rgba_n(const uint8_t *idx, int n, uint32_t *out)
 {
-    for (int i = 0; i < 320 * 200; i++) {
+    for (int i = 0; i < n; i++) {
         const uint8_t *c = v.screen_on ? v.pal[idx[i]] : v.pal[0];
         uint32_t r = (uint32_t)((c[0] << 2) | (c[0] >> 4));
         uint32_t g = (uint32_t)((c[1] << 2) | (c[1] >> 4));
