@@ -1,0 +1,36 @@
+name: Build Hocus
+
+# When this automation runs
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: # Adds a manual "Run workflow" button in the Actions tab
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Download your repository code onto the GitHub build machine
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Install the C compiler and SDL2 development files
+      - name: Install build tools and SDL2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsdl2-dev
+
+      # 3. Run your Makefile inside the port/ folder
+      - name: Compile hocus
+        working-directory: port
+        run: make -j$(nproc)
+
+      # 4. Save the compiled "hocus" file so you can download it from GitHub
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: hocus-linux
+          path: port/hocus
