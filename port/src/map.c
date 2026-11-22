@@ -151,38 +151,63 @@ void backdrop_draw_odd(uint16_t dest0, uint16_t src0, const uint8_t *l1, const u
 
 MapState g_map;
 
+/* one cell of the tile pass; rnd = the random source (the game's for the original screen) */
+static void animate_cell(uint16_t di, int c, int r, int (*rnd)(int))
+{
+    int si = g_map.dyn[di];
+    if (si != 0) {
+        int act = 0;
+        if (g_map.timer == 0) act = 1;
+        else act = (rnd(3) == 0);
+        if (act && (si == 1 || si == 2)) {
+            if (si == 1) g_map.fg[di] = 0xFF; else g_map.fg[di] = g_map.alt[di];
+            g_map.dyn[di] = 0;
+            if (g_map.timer != 0 && c < 0x14)
+                fx_spawn_puff((c << 2) - (g_cam.col_odd << 1), r << 4);
+        }
+    }
+    int t = g_map.bg[di];
+    if (t < 0xF0) {
+        const uint8_t *a = g_map.anim + t * 3;
+        int v = t;
+        if (a[2] == 0) return;
+        if (a[2] == 1) {
+            v = t + 1; if (a[1] < v) v = a[0];
+        } else if (a[2] == 2) {
+            if (a[0] != t) { v = t + 1; if (a[1] < v) v = a[0]; }
+            else if (rnd(20) == 0) v = t + 1;
+        }
+        g_map.bg[di] = (uint8_t)v;
+    }
+}
+
+/* Enhanced views: cells beyond the original screen use this generator, never the game's (saved with the state) */
+uint32_t g_map_view_rng = 1;
+static int view_rnd(int n) { g_map_view_rng = g_map_view_rng * 1103515245u + 12345u; return (int)((g_map_view_rng >> 16) % (uint32_t)n); }
+
 void map_animate(void)
 {
     g_map.timer--;
-    uint16_t di = (uint16_t)(g_cam.cam_row * MAP_WIDTH + g_cam.cam_col);
-    for (int r = 0; r < 10; r++) {
-        for (int c = 0; c < 21; c++, di++) {
-            int si = g_map.dyn[di];
-            if (si != 0) {
-                int act = 0;
-                if (g_map.timer == 0) act = 1;
-                else act = (rng_next(3) == 0);
-                if (act && (si == 1 || si == 2)) {
-                    if (si == 1) g_map.fg[di] = 0xFF; else g_map.fg[di] = g_map.alt[di];
-                    g_map.dyn[di] = 0;
-                    if (g_map.timer != 0 && c < 0x14)
-                        fx_spawn_puff((c << 2) - (g_cam.col_odd << 1), r << 4);
-                }
-            }
-            int t = g_map.bg[di];
-            if (t < 0xF0) {
-                const uint8_t *a = g_map.anim + t * 3;
-                int v = t;
-                if (a[2] == 0) continue;
-                if (a[2] == 1) {
-                    v = t + 1; if (a[1] < v) v = a[0];
-                } else if (a[2] == 2) {
-                    if (a[0] != t) { v = t + 1; if (a[1] < v) v = a[0]; }
-                    else if (rng_next(20) == 0) v = t + 1;
-                }
-                g_map.bg[di] = (uint8_t)v;
-            }
+    if (!g_view_ext.left && !g_view_ext.right && !g_view_ext.top && !g_view_ext.bottom) {     /* the original */
+        uint16_t di = (uint16_t)(g_cam.cam_row * MAP_WIDTH + g_cam.cam_col);
+        for (int r = 0; r < 10; r++) {
+            for (int c = 0; c < 21; c++, di++) animate_cell(di, c, r, rng_next);
+            di = (uint16_t)(di + 0xDB);
         }
-        di = (uint16_t)(di + 0xDB);
+        return;
+    }
+    /* Enhanced view: the original's 21 x 10 cells in the original order (same random numbers), plus every cell
+     * of the wider view and one more for the smoothing, so animations and switched tiles there aren't frozen */
+    int c0 = (g_view_ext.left * 4 - 15) / 16 - 1, c1 = 20 + (g_view_ext.right * 4 + 15) / 16 + 1;
+    int r0 = (g_view_ext.top - 15) / 16 - 1, r1 = 9 + (g_view_ext.bottom + 15) / 16 + 1;
+    for (int r = r0; r <= r1; r++) {
+        int row = g_cam.cam_row + r;
+        if (row < 0 || row >= 60) continue;
+        for (int c = c0; c <= c1; c++) {
+            int col = g_cam.cam_col + c;
+            if (col < 0 || col >= MAP_WIDTH) continue;
+            int orig = r >= 0 && r < 10 && c >= 0 && c < 21;
+            animate_cell((uint16_t)(row * MAP_WIDTH + col), c, r, orig ? rng_next : view_rnd);
+        }
     }
 }

@@ -45,5 +45,6 @@ typedef struct MapState {
     int16_t timer;         /* DS:CE76                                           */
 } MapState;
 extern MapState g_map;
-void map_animate(void);    /* uses g_cam (cam_row, cam_col, col_odd) */
+void map_animate(void);    /* uses g_cam (cam_row, cam_col, col_odd); covers g_view_ext too (Enhanced views) */
+extern uint32_t g_map_view_rng;   /* Enhanced views: random numbers for cells beyond the original screen */
 #endif

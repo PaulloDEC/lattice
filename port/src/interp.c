@@ -8,6 +8,7 @@
 #include "level.h"
 #include "timer.h"
 #include "loop.h"
+#include "frame.h"
 #include "state.h"
 #include <math.h>
 #include <string.h>
@@ -106,7 +107,8 @@ static int view_shift(int cam, int extra, int map, int size)
 static void set_view_ext(void)
 {
     ViewExt e = { 0, 0, 0, 0 };
-    if (s_wide || s_hudoff) {
+    /* demos replay recorded input, so their game must follow the original rules exactly (only the picture is wide) */
+    if ((s_wide || s_hudoff) && !g_demo_playback) {
         int W = view_w(), PH = play_h();
         int sx = view_shift(g_cam.cam_x * 8, (W - 320) / 2, MAP_PX_W, W);
         int sy = view_shift(g_cam.cam_row * 16, (PH - 160) / 2, MAP_PX_H, PH);
@@ -412,19 +414,38 @@ int interp_render(uint32_t *rgba, int *w)
     return interp_render_at(rgba, w, a);
 }
 
-/* The VGA page in an Enhanced view (menus, hint boxes, messages, fades, screens between levels): centred; while a
- * level is running, the sides keep the last level picture (with the current palette, so fades apply), else black. */
+/* The VGA page in an Enhanced view.  Overlays on the play area (hint boxes, status messages: keep_sides) are drawn
+ * by the original straight onto the shown page, so the pixels that differ from that tick's own picture are the
+ * overlay: they go onto the last level picture (current palette, so fades apply), placed as on the original
+ * screen.  Anything bigger (more than 60 % changed), menus and screens between levels: the page centred, sides black. */
 int interp_compose_vga(uint32_t *rgba, int *w, int keep_sides)
 {
-    int W = view_w();
-    if (W == 320) return 0;
+    int W = view_w(), PH = play_h();
+    if (W == 320 && PH == 160) return 0;
     int ox = (W - 320) / 2;
     static uint8_t vga[320 * 200];
     vga_render_indexed(vga);
-    int sides = keep_sides && s_level_active && s_last_w == W;
-    if (sides) memcpy(s_idx, s_last, (size_t)W * 200); else memset(s_idx, 0, (size_t)W * 200);
+    if (keep_sides && s_level_active && s_last_w == W && s_last_ph == PH && cur->valid) {
+        int changed = 0;
+        for (int i = 0; i < 320 * 200; i++) changed += vga[i] != cur->img[i];
+        if (changed < 320 * 200 * 6 / 10) {
+            int oy = (PH - 160) / 2;
+            memcpy(s_idx, s_last, (size_t)W * 200);
+            for (int y = 0; y < 200; y++)
+                for (int x = 0; x < 320; x++)
+                    if (vga[y * 320 + x] != cur->img[y * 320 + x]) {
+                        int Y = y < 160 ? y + oy : y;      /* play area: centred like the view; status panel rows stay */
+                        s_idx[Y * W + x + ox] = vga[y * 320 + x];
+                    }
+            to_rgba(s_idx, W, PH, PH, rgba);
+            *w = W;
+            return 1;
+        }
+    }
+    if (W == 320) return 0;
+    memset(s_idx, 0, (size_t)W * 200);
     for (int y = 0; y < 200; y++) memcpy(s_idx + y * W + ox, vga + y * 320, 320);
-    to_rgba(s_idx, W, 200, sides ? (s_last_ph < 200 ? s_last_ph : 200) : 0, rgba);
+    to_rgba(s_idx, W, 200, 0, rgba);
     *w = W;
     return 1;
 }

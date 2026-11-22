@@ -371,7 +371,14 @@ static int frame_hook(int n)
     return g_quit;
 }
 /* ---- UI hooks (modal boxes, end screen) ---- */
-static int ui_poll(void) { pump(); present(); SDL_Delay(15); return g_quit; }
+static int s_dump_poll = -1;                       /* --dump-poll K --dump f.ppm: dump at the K-th modal wait poll (hint boxes...) */
+static void dump_frame(void);
+static int ui_poll(void)
+{
+    pump(); present(); SDL_Delay(15);
+    if (s_dump_poll > 0 && --s_dump_poll == 0 && g_dump_file) { dump_frame(); g_quit = 1; }
+    return g_quit;
+}
 static int s_end_polls;
 static int ui_kbhit(void)
 {
@@ -492,6 +499,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--smooth")) smooth = 1;
         else if (!strcmp(argv[i], "--wide")) wide = 1;
         else if (!strcmp(argv[i], "--hud-off")) hudoff = 1;
+        else if (!strcmp(argv[i], "--dump-poll") && i + 1 < argc) s_dump_poll = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--runahead") && i + 1 < argc) runahead = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--smooth-check")) s_check = 1;
         else if (!strcmp(argv[i], "--frame-hash") && i + 1 < argc) s_hash_f = fopen(argv[++i], "w");

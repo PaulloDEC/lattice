@@ -737,5 +737,24 @@ identical to run-ahead 0 by `--frame-hash` (E1L2, E2L4).  Shots fly on past the 
 (E1L2).  `tests/diff_run.py all`: 72 runs, 0 mismatches.  `--dump` and `--dump-alpha` write the picture as shown
 (426 wide in the wide view).
 
+**Fixes after the first test (2026-11-22):**
+* *Tile animations and switched tiles froze beyond the 4:3 area.*  The original's tile pass (`map_animate`) only
+  covers the 21 x 10 cells of its own screen: animated background tiles advance and pending switch changes
+  (`g_map.dyn`, set for a whole rectangle by `open_rect`) are applied only there - elsewhere they wait until scrolled
+  in.  With a non-zero `g_view_ext` it now covers the whole view plus one cell (for the smoothing), in row order;
+  cells inside the original screen still take the game's random numbers in the original order, the others use
+  `g_map_view_rng` (saved with the state, so run-ahead stays exact).  Applied switch tiles change collision, so the
+  extra area behaves sooner than on DOS - only where you can already see it.  Checked with a C test that sets up
+  every level and runs the pass with a wide + HUD-off extent: 22 cells beyond the original screen change on 7
+  levels' opening views (0 before).
+* *Demos:* `g_view_ext` stays zero while a demo plays (`g_demo_playback`): demos replay recorded input and must follow
+  the original rules exactly; only their picture is wide.
+* *Talking to a wizard switched back to the 4:3 HUD view.*  Overlays drawn on the shown page (hint boxes, status
+  messages) are now found by comparing the page with that tick's picture (`cur->img`); only the changed pixels are
+  drawn onto the last level picture, placed as on the original screen (centred like the view: +ox, and + (PH-160)/2
+  for play-area rows).  More than 60 % changed counts as a full-screen display (centred, black sides).  This also
+  covers HUD off in the 320-wide view.
+* Test option `--dump-poll K` (with `--dump f.ppm`): dump on the K-th poll of a modal wait (hint box, message).
+
 **Open (for later):** wider HUD art; HUD Off needs some status display (health / score) eventually; a wider view can
 show parts of levels the designers never expected to be seen together (no problem spotted on the levels looked at).

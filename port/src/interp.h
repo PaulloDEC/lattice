@@ -25,9 +25,9 @@ int  interp_ready(void);            /* inside a level's tick wait with a recorde
 int  interp_render(uint32_t *rgba, int *w);
 int  interp_render_at(uint32_t *rgba, int *w, double alpha);    /* alpha 0 = start of the blend, 1 = its end */
 int  interp_render_latest(uint8_t out[320 * 200]);              /* the latest real tick, classic view (tests) */
-/* The VGA page for an Enhanced view, centred.  keep_sides: an overlay on the play area (hint box, message,
- * pause) - while a level runs the sides keep its last picture; else (menus, screens) they are black.
- * Returns 0 in a 320-wide view (show the VGA page as is). */
+/* The VGA page for an Enhanced view.  keep_sides: an overlay on the play area (hint box, message) - drawn onto
+ * the last level picture; else (menus, screens) the page centred with black sides.
+ * Returns 0 when the VGA page should be shown as is (classic view, or a 320-wide full-screen display). */
 int  interp_compose_vga(uint32_t *rgba, int *w, int keep_sides);
 
 /* Enhanced views: wide = 16:9 (426 x 200), hud_off = the play area fills all 200 rows.  Either one also

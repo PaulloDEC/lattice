@@ -39,7 +39,7 @@ static void init(void)
     ADD(g_spawn_groups); ADD(g_levers); ADD(g_doors1); ADD(g_doors2); ADD(g_lv); ADD(g_teleporters); ADD(g_tile_items); ADD(g_hints);
     ADD(g_demo_buf); ADD(g_demo_len); ADD(g_enemies_total); ADD(g_sprite_ids); ADD(g_episode);
     ADD(g_score_saved); ADD(g_music_on); ADD(g_sound_on);
-    ADD(g_map);
+    ADD(g_map); ADD(g_map_view_rng);
     ADD(g_proj); ADD(g_player);
     ADD(g_spr);
     ADD(g_star_ang); ADD(g_star_rad); ADD(g_star_br); ADD(g_star_spd); ADD(g_star_spd2);
