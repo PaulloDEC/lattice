@@ -814,3 +814,28 @@ up / down), so menus stay usable whatever the remap.  Bindings changed: everythi
 A jumps by default, Y doesn't; after the remap Y jumps and A doesn't; B fires as an extra and jumps when assigned to Jump.
 HOCUS.CFG round trip identical; bad values refused.  `--smooth-check` 598 ticks / 0 differences / 0 mispredictions;
 run-ahead 0 vs 1 identical (E2L4, wide).
+
+## 50. Playtest fixes (2026-11-22, evening)
+
+* **Starfields in the wide view, everywhere.**  Two implementations exist: the front end's (`frontend.c` sparkles:
+  menus, key waits, save / restore lists; C `rand()`) and `stars.c` (the end-of-level screen via `ui_end_screen`; uses
+  the game's random numbers).  The side layer moved to `stars.c` (`g_star_side[200][432]`, `g_star_wide_extra`,
+  `g_star_side_steps`, `stars_side_clear()`), shared by both.  `stars.c`'s own stars are left exactly as the original
+  (same random numbers); a star leaving the 320 columns sideways is copied into a cosmetic "ghost" (up to 64) that
+  keeps flying through the side area to the wide edge.  The platform layer draws the side layer on every full-screen
+  display (`interp_compose_vga` returns 2) while a starfield has stepped within the last second.
+* **Backdrop at level edges.**  In the wide view the view stops at a map edge before the original camera does
+  (+53 px), but the backdrop origin followed the original camera.  It now follows the view: origin =
+  `cam_x * 4 + floor((sxo - ox) / 2)` - identical to before away from edges and in the classic view (ox = sxo = 0).
+  Measured at E1L1's start: the classic camera starts at ~tick 42, the wide view at tick 50; the backdrop now starts
+  with the view.
+* **Overlays at the start of a level (and generally).**  `interp_compose_vga` picks the frame drawn on the *shown*
+  page (each frame records `page`): the latest finished tick, or the tick being drawn when its page is already up -
+  E1L1's start-of-level picture (IMG 16, drawn into the frame being built, before any tick has finished) and anything
+  hot keys draw after a tick.  For the frame being drawn, the reference (what the page shows without the overlay) is
+  its classic redraw.  The front-end flag that forced black sides for everything reached through the front end is
+  gone: during a level the 60 % rule alone decides (the F-key screens - help, save, quit, volume - are full screens in
+  Hocus, so they stay centred with black sides).  Every level was started in wide + HUD off without input: none opens a
+  box by itself besides E1L1's picture.
+* **"Quit - return to DOS"** is now **"Exit the game"** (the letter jump stays unique: E).
+* `--dump-poll` also works in the start-of-level key wait.

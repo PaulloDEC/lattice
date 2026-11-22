@@ -20,4 +20,13 @@ extern uint8_t  g_star_spd2[STAR_COUNT]; /* DS:79F4 */
 void stars_set_table(const uint8_t entry5[2880]);   /* 0548:02F7 (the 360 x 2 floats are DAT entry 5) */
 void stars_init(void);                              /* 06B8:039C */
 void stars_step(void);                              /* 06B8:0103  one frame: move all stars, then wait for the vertical retrace */
+/* port, wide view: the starfields beyond the VGA page's 320 columns.  Both starfields (this one, used by the end
+ * of level screen, and the front end's) put such points into g_star_side (wide x, 0 = nothing), which the platform
+ * layer draws at the sides of full-screen displays.  This one uses the game's random numbers, so its stars stay
+ * exactly the original's; a star leaving the picture sideways goes on as a cosmetic copy until the wide edge. */
+#define STAR_SIDE_W 432
+extern int g_star_wide_extra;                        /* extra columns each side (0 = 320 wide) */
+extern uint8_t g_star_side[200][STAR_SIDE_W];
+extern unsigned g_star_side_steps;                   /* counts starfield steps (the side stars are live while it moves) */
+void stars_side_clear(void);
 #endif

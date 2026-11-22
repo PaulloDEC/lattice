@@ -29,6 +29,7 @@ typedef struct {
 #define SNAP_H (SNAP_MT + 10 + 5)                 /*     HUD off (+20 px above and below) + blending */
 typedef struct {
     int valid, nosmooth, flash;                   /* flash: the play area is one colour (level_flash) */
+    uint16_t page;                                /* VRAM offset of the page it was drawn on */
     int cam_x, cam_row, cam_col, col_odd;
     uint32_t tick;                                /* timer_last() of the tick that drew it */
     int16_t cells[SNAP_W * SNAP_H];
@@ -136,6 +137,7 @@ static void tick_begin(void)
     f->valid = 1; f->nosmooth = 0; f->flash = g_lv.flash != 0 ? 0x77 - g_lv.flash : -1; f->n = 0;
     f->cam_x = g_cam.cam_x; f->cam_row = g_cam.cam_row; f->cam_col = g_cam.cam_col; f->col_odd = g_cam.col_odd;
     f->tick = timer_last();
+    f->page = video_draw_offset();
     f->nlift = 0;
     set_view_ext();
     for (int r = 0; r < SNAP_H; r++)
@@ -331,7 +333,9 @@ static void render_pair(uint8_t *out, int W, int PH, const Frame *A, const Frame
     /* the view around the original screen: centred, kept inside the map */
     int sxo = view_shift(cmx, ox, MAP_PX_W, W), syo = view_shift(csy, (PH - 160) / 2, MAP_PX_H, PH);
     if (B->flash >= 0) memset(out, B->flash, (size_t)W * PH);       /* level_flash: one colour, sprites on top */
-    else draw_world(out, W, PH, B, cmx + sxo, csy + syo, bdx + sxo);
+    /* the backdrop scrolls with the view (half speed): where the view stops at a map edge, so does the backdrop,
+     * though the original camera behind it may still be moving */
+    else draw_world(out, W, PH, B, cmx + sxo, csy + syo, bdx + (int)floor((sxo - ox) / 2.0));
 
     /* lift platforms: matched with the previous tick's (same tile, same column, same or neighbouring row) */
     for (int i = 0; i < B->nlift && B->flash < 0; i++) {
@@ -455,26 +459,36 @@ int interp_render(uint32_t *rgba, int *w)
     return interp_render_at(rgba, w, a);
 }
 
-/* The VGA page in an Enhanced view.  Overlays on the play area (hint boxes, status messages: keep_sides) are drawn
- * by the original straight onto the shown page, so the pixels that differ from that tick's own picture are the
- * overlay: they go onto the last level picture (current palette, so fades apply), placed as on the original
- * screen.  Anything bigger (more than 60 % changed), menus and screens between levels: the page centred, sides black. */
+/* The VGA page in an Enhanced view.  During a level, overlays (hint boxes, messages, the start-of-level picture,
+ * the quit / volume boxes...) are drawn by the original straight onto the shown page: the pixels that differ from
+ * that page's own frame are the overlay, and go onto the level picture, placed as on the original screen.  The frame
+ * is the one drawn on the shown page - the latest finished tick, or the tick being drawn when that page is already
+ * up (the start-of-level picture; hot keys after the tick).  More than 60 % changed counts as a full-screen display
+ * (menus, help, save screens): the page centred with black sides, as outside levels.  Returns 2 for that case,
+ * 1 for an overlay, 0 when the VGA page should be shown as is (classic view). */
 int interp_compose_vga(uint32_t *rgba, int *w, int keep_sides)
 {
     int W = view_w(), PH = play_h();
     if (W == 320 && PH == 160) return 0;
     int ox = (W - 320) / 2;
-    static uint8_t vga[320 * 200];
+    static uint8_t vga[320 * 200], ref[320 * 200];
     vga_render_indexed(vga);
-    if (keep_sides && s_level_active && s_last_w == W && s_last_ph == PH && cur->valid) {
+    uint16_t shown = vga_get_start();
+    Frame *F = NULL; int fresh = 0;
+    if (s_armed && s_rec == bld && bld->valid && bld->page == shown) { F = bld; fresh = 1; }
+    else if (cur->valid && cur->page == shown && s_last_w == W && s_last_ph == PH) F = cur;
+    if (keep_sides && s_level_active && F) {
+        if (fresh) { memcpy(bld->img, vga, sizeof vga); render_pair(ref, 320, 160, bld, bld, 1.0); }
+        else memcpy(ref, cur->img, sizeof ref);
         int changed = 0;
-        for (int i = 0; i < 320 * 200; i++) changed += vga[i] != cur->img[i];
+        for (int i = 0; i < 320 * 200; i++) changed += vga[i] != ref[i];
         if (changed < 320 * 200 * 6 / 10) {
             int oy = (PH - 160) / 2;
-            memcpy(s_idx, s_last, (size_t)W * 200);
+            if (fresh) render_pair(s_idx, W, PH, bld, bld, 1.0);
+            else memcpy(s_idx, s_last, (size_t)W * 200);
             for (int y = 0; y < 200; y++)
                 for (int x = 0; x < 320; x++)
-                    if (vga[y * 320 + x] != cur->img[y * 320 + x]) {
+                    if (vga[y * 320 + x] != ref[y * 320 + x]) {
                         int Y = y < 160 ? y + oy : y;      /* play area: centred like the view; status panel rows stay */
                         s_idx[Y * W + x + ox] = vga[y * 320 + x];
                     }
@@ -488,7 +502,7 @@ int interp_compose_vga(uint32_t *rgba, int *w, int keep_sides)
     for (int y = 0; y < 200; y++) memcpy(s_idx + y * W + ox, vga + y * 320, 320);
     to_rgba(s_idx, W, 200, 0, rgba);
     *w = W;
-    return 1;
+    return 2;
 }
 
 void interp_set_view(int wide, int hud_off) { s_wide = wide != 0; s_hudoff = hud_off != 0; s_last_w = 0; set_view_ext(); }

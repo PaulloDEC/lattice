@@ -37,7 +37,6 @@
 
 static SDL_Window *g_win; static SDL_Renderer *g_ren; static SDL_Texture *g_tex;
 static int g_quit, g_dump_at = -1; static const char *g_dump_file; static double s_dump_alpha = -1;
-static int s_menu_screen;                         /* a front-end screen is up (menus, help...): black sides in wide */
 static uint32_t g_pix[432 * 200];               /* the presented picture, s_pix_w x 200 (320, or 426 wide) */
 static int s_pix_w = 320;
 
@@ -122,13 +121,13 @@ static void side_stars(int w)                    /* wide menus: the starfield be
 {
     static unsigned last_steps; static Uint32 last_change;
     Uint32 now = SDL_GetTicks();
-    if (g_front_side_steps != last_steps) { last_steps = g_front_side_steps; last_change = now; }
+    if (g_star_side_steps != last_steps) { last_steps = g_star_side_steps; last_change = now; }
     if (now - last_change > 1000) return;          /* no starfield running: nothing at the sides */
     int ox = (w - 320) / 2;
     for (int y = 0; y < 200; y++)
-        for (int x = 0; x < w && x < FRONT_SIDE_W; x++) {
+        for (int x = 0; x < w && x < STAR_SIDE_W; x++) {
             if (x == ox) x += 320;
-            uint8_t c = x < FRONT_SIDE_W ? g_front_side[y][x] : 0;
+            uint8_t c = x < STAR_SIDE_W ? g_star_side[y][x] : 0;
             if (!c) continue;
             uint32_t r = vga_palette(c, 0), g = vga_palette(c, 1), b = vga_palette(c, 2);
             r = (r << 2) | (r >> 4); g = (g << 2) | (g >> 4); b = (b << 2) | (b >> 4);
@@ -139,11 +138,12 @@ static int compose(void)                          /* the picture to show into g_
 {
     int w = 320;
     if (interp_render(g_pix, &w)) return w;
-    if (interp_compose_vga(g_pix, &w, !s_menu_screen)) { if (s_menu_screen && w > 320) side_stars(w); return w; }
+    int r = interp_compose_vga(g_pix, &w, 1);
+    if (r) { if (r == 2) side_stars(w); return w; }      /* full-screen display: the starfield (if any) at the sides */
     vga_render_rgba(g_pix);
     return 320;
 }
-static void view_changed(void) { g_front_wide_extra = (interp_view_width() - 320) / 2; frontend_side_clear(); }
+static void view_changed(void) { g_star_wide_extra = (interp_view_width() - 320) / 2; stars_side_clear(); }
 static int s_tex_w;
 static void set_tex_width(int w)                  /* texture w x 200 shown at w x 240 (200 rows stretched, as on a CRT) */
 {
@@ -458,7 +458,6 @@ static int  f_quit(void) { int r = frontend_overlay_quit(); menu_flush(); input_
 static void f_vol(void) { frontend_overlay_volume(); menu_flush(); input_reset(); }
 static void front_pace(void)        /* --keys "DDE.." scripted menu keys (U D E=enter X=esc, letters), one every 30 iterations; --frames N --dump: dump after N */
 {
-    s_menu_screen = 1;                                /* until the next level tick */
     pump(); present(); SDL_Delay(g_dump_at >= 0 || s_script ? 1 : 16);
     ++s_pace; pad_script_step();
     if (s_script && s_pace % 30 == 0 && *s_script) { char c = *s_script++; if (c >= 'a' && c <= 'z') tq_push(c); else if (c == '<') kq_push(FK_BKSP); else if (c == '+') kq_push(FK_RIGHT); else if (c == '-') kq_push(FK_LEFT); else kq_push(c == 'U' ? FK_UP : c == 'D' ? FK_DOWN : c == 'E' ? FK_ENTER : c == 'X' ? FK_ESC : c); }
@@ -472,9 +471,9 @@ static void pause_game(void)                 /* P: wait for the next P */
 }
 static void wait_key(void)                   /* the "press a key" screen before a level */
 {
-    if (g_dump_at >= 0) return;
+    if (g_dump_at >= 0 && s_dump_poll <= 0) return;
     g_in.any_key = 0;
-    while (!g_quit && !g_in.any_key) { pump(); present(); SDL_Delay(15); }
+    while (!g_quit && !g_in.any_key) ui_poll();       /* pump, present, --dump-poll */
     g_in.any_key = 0; input_reset();
 }
 static int end_screen(int finished, int goal, int collected) { return ui_end_screen(finished, goal, collected); }
@@ -505,7 +504,6 @@ static void dump_pending(void)                   /* --dump-alpha: the smooth pic
 static void tick_shown_main(void)
 {
     tap_flush();                                     /* the tick that just ran has seen every tap; also before run-ahead */
-    s_menu_screen = 0;
     s_tick_shown_inner();
     ++s_shown;
     static uint8_t a[320 * 200], b[320 * 200];

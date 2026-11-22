@@ -9,6 +9,7 @@
 #include "input.h"
 #include "dat.h"
 #include "config.h"
+#include "stars.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -27,17 +28,13 @@ static int16_t s_rad[NSPARK], s_ang[NSPARK];            /* DS:7AD6 / 7B6C */
 static uint8_t s_spd[NSPARK], s_col[NSPARK], s_inc[NSPARK];   /* DS:7A8A / 7A3F / 79F4 */
 static int s_spark_ready;
 /* port, wide view: stars fly on to the edges of the wide picture; those beyond the 320 columns of the VGA page go
- * into g_front_side (wide coordinates, 0 = nothing), which the platform layer shows at the sides. */
-int g_front_wide_extra;
-uint8_t g_front_side[200][FRONT_SIDE_W];
-unsigned g_front_side_steps;
+ * into the side layer (stars.h, wide coordinates), which the platform layer shows at the sides. */
 static int spark_pos(int i, int *x, int *y)             /* returns non-zero when the point is outside the screen */
 {
     *x = (int)((int32_t)s_rad[i] * s_tx[s_ang[i]] / 1000000) + 0xA0; *y = (int)((int32_t)s_rad[i] * s_ty[s_ang[i]] / 1000000) + 0x70;
-    return *x < -g_front_wide_extra || *x > 0x13F + g_front_wide_extra || *y < 0 || *y > 0xC7;
+    return *x < -g_star_wide_extra || *x > 0x13F + g_star_wide_extra || *y < 0 || *y > 0xC7;
 }
-static int side_x(int x) { return x + g_front_wide_extra; }
-void frontend_side_clear(void) { memset(g_front_side, 0, sizeof g_front_side); }
+static int side_x(int x) { return x + g_star_wide_extra; }
 static void spark_respawn(int i, int *x, int *y)
 {
     do { s_ang[i] = (int16_t)(rand() % 360); s_rad[i] = (int16_t)(rand() % 0xA0); } while (spark_pos(i, x, y));
@@ -56,20 +53,20 @@ void sparkles_init(void)
     s_spark_ready = 1;
 }
 /* a sparkle screen ends: fade out (the side stars fade with it), then the side stars go */
-static void menu_fade_out(void) { video_pal_fade_out(0x14); frontend_side_clear(); }
+static void menu_fade_out(void) { video_pal_fade_out(0x14); stars_side_clear(); }
 
 static void sparkles_step(void)
 {
     if (!s_spark_ready) return;
-    g_front_side_steps++;
+    g_star_side_steps++;
     for (int i = 0; i < NSPARK; i++) {
         int x, y; spark_pos(i, &x, &y);
-        if (x < 0 || x > 0x13F) { if (side_x(x) >= 0 && side_x(x) < FRONT_SIDE_W) g_front_side[y][side_x(x)] = 0; }
+        if (x < 0 || x > 0x13F) { if (side_x(x) >= 0 && side_x(x) < STAR_SIDE_W) g_star_side[y][side_x(x)] = 0; }
         else if (video_get_pixel(x, y) >= 0xF0) video_put_pixel(x, y, 0);
         s_rad[i] = (int16_t)(s_rad[i] + s_spd[i]);
         s_col[i] = (uint8_t)(s_col[i] + s_inc[i]); if (s_col[i] > 0x7F) s_col[i] = 0x7F;
         if (spark_pos(i, &x, &y)) spark_respawn(i, &x, &y);
-        if (x < 0 || x > 0x13F) { if (side_x(x) >= 0 && side_x(x) < FRONT_SIDE_W) g_front_side[y][side_x(x)] = (uint8_t)(0xF0 + (s_col[i] >> 3)); }
+        if (x < 0 || x > 0x13F) { if (side_x(x) >= 0 && side_x(x) < STAR_SIDE_W) g_star_side[y][side_x(x)] = (uint8_t)(0xF0 + (s_col[i] >> 3)); }
         else if (video_get_pixel(x, y) == 0) video_put_pixel(x, y, 0xF0 + (s_col[i] >> 3));
     }
 }
@@ -77,7 +74,7 @@ static void sparkles_step(void)
 /* ---------------------------------------------------------------- menu data (DS:1A04..1AD4, strings from the EXE) */
 #define MAXITEMS 10
 static const char *k_main[]  = { "Begin a new game", "Restore an old game", "Ordering Information~", "Instructions", "Legends and hints~",
-                                 "Change game options", "High scores", "Quit - return to DOS" };
+                                 "Change game options", "High scores", "Exit the game" };
 static const char *k_ep[]    = { "Which game do you want to play?", "Time Tripping", "Shattered Worlds", "Warped and Weary", "Destination Home" };
 static const char *k_level[] = { "Which level do you want to play?", "1) Level #1", "2) Level #2", "3) Level #3", "4) Level #4", "5) Level #5",
                                  "6) Level #6", "7) Level #7", "8) Level #8", "9) Boss Level!" };

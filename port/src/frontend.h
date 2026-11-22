@@ -88,10 +88,4 @@ int  hs_check(int episode, uint32_t score);    /* 06B8:1BAE  inserts when it qua
 void hs_enter(int episode, int pos);           /* 06B8:1C9B  name entry screen */
 void hs_view(void);                            /* 06B8:2018(0) the four tables */
 void frontend_episode_end(int episode);        /* 06B8:4D76 + 40FD..41BD: fanfare screen and the ending pages of an episode */
-/* port, wide view: the menu starfield beyond the VGA page's 320 columns (see sparkles_step) */
-#define FRONT_SIDE_W 432
-extern int g_front_wide_extra;                       /* extra columns each side (0 = 320 wide) */
-extern uint8_t g_front_side[200][FRONT_SIDE_W];      /* star pixels at wide x (0 = none) */
-extern unsigned g_front_side_steps;                  /* counts starfield steps (the stars are live while it moves) */
-void frontend_side_clear(void);
 #endif
