@@ -34,7 +34,8 @@ jobs:
         with:
           name: hocus-linux
           path: port/hocus
-build-windows:
+
+  build-windows:
     runs-on: windows-latest
 
     steps:
