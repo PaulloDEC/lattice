@@ -37,11 +37,15 @@ typedef struct FrontHooks {
     void (*sfx)(int id);                /* 136B:000B */
     uint32_t (*ticks)(void);            /* milliseconds */
     void (*voc)(int entry);             /* 136B:01B8 play one digitised sound (DAT entry) */
+    /* port: */
+    void (*port_apply)(void);           /* g_port (config.h) changed: apply it and save HOCUS.CFG */
+    int  (*pad_button)(void);           /* next controller button press (config.h codes), -1 = none */
 } FrontHooks;
 extern FrontHooks g_front;
 
 /* Menu ids of 06B8:0B21 */
-enum { MENU_MAIN, MENU_EPISODE, MENU_OPTIONS, MENU_LEVEL, MENU_SKILL, MENU_GAME, MENU_SPEED = 7 };
+enum { MENU_MAIN, MENU_EPISODE, MENU_OPTIONS, MENU_LEVEL, MENU_SKILL, MENU_GAME, MENU_SPEED = 7,
+       MENU_HUD, MENU_ASPECT, MENU_FRAMERATE, MENU_PAD, MENU_COUNT };   /* 8.. the port's */
 
 /* 0B21 + 19A4 + 2259: returns the selected item (0-based, title excluded), 0xFF for Esc, 0x9D for the idle time-out. */
 int  menu_show(int id, int main_flag);
@@ -84,4 +88,10 @@ int  hs_check(int episode, uint32_t score);    /* 06B8:1BAE  inserts when it qua
 void hs_enter(int episode, int pos);           /* 06B8:1C9B  name entry screen */
 void hs_view(void);                            /* 06B8:2018(0) the four tables */
 void frontend_episode_end(int episode);        /* 06B8:4D76 + 40FD..41BD: fanfare screen and the ending pages of an episode */
+/* port, wide view: the menu starfield beyond the VGA page's 320 columns (see sparkles_step) */
+#define FRONT_SIDE_W 432
+extern int g_front_wide_extra;                       /* extra columns each side (0 = 320 wide) */
+extern uint8_t g_front_side[200][FRONT_SIDE_W];      /* star pixels at wide x (0 = none) */
+extern unsigned g_front_side_steps;                  /* counts starfield steps (the stars are live while it moves) */
+void frontend_side_clear(void);
 #endif

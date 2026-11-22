@@ -756,5 +756,61 @@ identical to run-ahead 0 by `--frame-hash` (E1L2, E2L4).  Shots fly on past the 
   covers HUD off in the 320-wide view.
 * Test option `--dump-poll K` (with `--dump f.ppm`): dump on the K-th poll of a modal wait (hint box, message).
 
+**Fixes, round 2 (2026-11-22):**
+* *Lift platforms snapped while the player glided.*  A lift is two foreground tiles (`g_mv.plat_tile_b` left,
+  `plat_tile_a` right) that `player_move` moves a whole cell (16 px) per tick together with the player.  The snapshot
+  now lists lift tiles (`Frame.lift[]`) and stores what lies behind them in their cells (layer 2 or backdrop); the
+  renderer draws each lift tile after the world, matched with the previous tick's (same tile and column, same or
+  neighbouring row) and blended like the sprites, so platform and player move together.  Checked on E3L3 riding a
+  lift up: `--smooth-check` 0 differences / 0 mispredictions; in-between frames keep Hocus standing on it.
+* *Menu starfield in the wide view.*  `frontend.c`'s stars (C `rand()`, not the game's random numbers) now fly to the
+  wide edges (`g_front_wide_extra`, set from the view); points beyond the VGA page's 320 columns go into
+  `g_front_side[200][432]`, which `compose()` draws at the sides of front-end screens with the current palette (so
+  fades apply).  Every front-end fade-out (`menu_fade_out`) clears it afterwards; it is also ignored when the starfield
+  hasn't moved for a second.  A view change clears it.
+
 **Open (for later):** wider HUD art; HUD Off needs some status display (health / score) eventually; a wider view can
 show parts of levels the designers never expected to be seen together (no problem spotted on the levels looked at).
+
+## 49. Options menu for the port's features; HOCUS.CFG; Controller Remap
+
+**Change game options** (menu 2, also reached from the in-game menu) now has nine entries (tildes add the group gaps):
+Sound is now on/off, Music is now on/off, Volume control~ / HUD style: Classic|Off, Aspect ratio: 4:3|16:9,
+Framerate: <value>~ / Game playing speed, Keyboard remap (the old "Define key controls" screen), Controller remap
+(replaces "Joystick is now on/off"; the DOS joystick code was never ported and HOCUS.SAV keeps writing it as off).
+First letters stay unique for the letter jump.  The three new entries open lists styled like Game Speed (menu ids 8
+`MENU_HUD`, 9 `MENU_ASPECT`, 10 `MENU_FRAMERATE`; `choose()` opens each on the current value - Game Speed now does
+too).  A choice applies at once (`g_front.port_apply`) and saves HOCUS.CFG.
+
+**Framerate:** Original = no smoothing (the picture changes at the tick rate, as on DOS; wide / HUD off still work);
+30 / 60 / 120 fps = smoothing with a frame cap in `idle()`; Display = smoothing at the refresh rate (vsync).  A cap
+above the refresh rate behaves like Display.  Run-ahead is 1 whenever smoothing is on (no option; `--runahead N` for
+tests); tap latching is on with smoothing.
+
+**HOCUS.CFG** (`config.[ch]`, next to HOCUS.SAV, which keeps its 990-byte DOS layout): plain text, `key=value`:
+`hud=classic|off`, `aspect=4:3|16:9`, `framerate=original|30|60|120|display`, `pad_jump`, `pad_fire`, `pad_look_up`,
+`pad_look_down`, `pad_pause` = A, B, X, Y, View, L-Stick, R-Stick, LB, RB, Share, P1..P4 (Steam Deck back buttons),
+Touchpad, LT, RT.  Unknown lines are ignored, bad values keep the default (D-pad, Menu and Guide are refused).
+Defaults: Classic HUD, 4:3, Display, Jump A, Fire X, Look up LB, Look down RB, Pause View.  `--wide`, `--hud-off`,
+`--smooth` override it for one run (not saved).  Test runs (`--dump`, `--keys`, `--pad`, `--smooth-check`,
+`--frame-hash`) never read or write it and start with framerate Original.
+
+**Shortcuts** (kept until the menus are proven): F7 aspect, F8 HUD, F11 Original <-> the last smooth framerate; all three
+change the same settings and save them; the notice shows "ASPECT: .. HUD: .. FRAMERATE: ..".  F12 (run-ahead) and the
+stick clicks (L3 view, R3 smoothing) are gone - the stick clicks can now be assigned in Controller Remap.
+
+**Controller Remap** (frontend.c `pad_remap` / `pad_prompt`): the Define Keys screens' look, but driven by the menu
+marker so a controller can work it: a list "Jump - A" .. "Pause - View", "Reset to defaults" (menu 11 `MENU_PAD`);
+choosing an action shows "Press a button for: Jump" / "Currently A" and takes the next controller press
+(`g_front.pad_button`, raw presses queued by main_sdl.c).  Menu (Start) or Esc cancels; D-pad / Guide are ignored.
+A button does one thing: taking one from another action gives that action the old button (swap).
+**Controller layer** (main_sdl.c): game actions jump / fire / look up / look down / pause follow `g_port.pad`; B (fire),
+LT (jump), RT (fire) work as extras while not assigned to anything; fixed: D-pad / left stick move, right stick looks,
+Menu = Esc.  Menu keys are fixed per physical button (D-pad / stick navigate, A Enter, B and Menu Esc, LB / RB page
+up / down), so menus stay usable whatever the remap.  Bindings changed: everything held is released.
+
+**Checks:** menus rendered (options, framerate list, remap list); 16:9 chosen through the menus switches the menu to
+426 wide at once; Jump remapped to Y with the virtual pad shows "Jump - Y"; in play (`--pad-map jump=Y`, test option):
+A jumps by default, Y doesn't; after the remap Y jumps and A doesn't; B fires as an extra and jumps when assigned to Jump.
+HOCUS.CFG round trip identical; bad values refused.  `--smooth-check` 598 ticks / 0 differences / 0 mispredictions;
+run-ahead 0 vs 1 identical (E2L4, wide).

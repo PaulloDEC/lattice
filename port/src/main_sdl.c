@@ -5,10 +5,10 @@
  *   hocus [--dat HOCUS.DAT] [--episode 0..3] [--level 0..8] [--scale N] [--fullscreen]
  *         [--frames N --dump file.ppm]      (headless smoke test: run N frames, write the last frame, exit)
  *   Keys: arrows move, Ctrl jump, Alt fire (the game's own defaults), P pause, M / S music / sound, Esc menu.
- *   Game controller: see the controller section below (D-pad/stick move, A jump, X/B fire, Start menu).
- *   Smoothing (Enhanced display interpolation, interp.c): F11 or right stick click toggles; --smooth starts with it on.
- *   Run-ahead (default 1): F12 cycles 0 / 1 / 2; --runahead N.
- *   Views: F7 wide 16:9 on / off (--wide), F8 HUD on / off (--hud-off), left stick click cycles the four.
+ *   Game controller: see the controller section below (D-pad/stick move, A jump, X/B fire, Menu = Esc); Controller Remap.
+ *   The port's settings (Change game options: HUD style, aspect ratio, framerate, controller remap) live in HOCUS.CFG
+ *   (config.c).  Shortcuts: F7 aspect 4:3 / 16:9, F8 HUD on / off, F11 framerate Original / last smooth one.
+ *   --wide, --hud-off, --smooth override HOCUS.CFG for the run; run-ahead is 1 while smoothing (--runahead N for tests).
  *   Tests: --smooth-check (smooth picture at each tick == VGA page), --dump-alpha A (with --frames N --dump f.ppm).
  */
 #include <SDL.h>
@@ -32,6 +32,8 @@
 #include "enemy.h"
 #include "frame.h"
 #include "interp.h"
+#include "config.h"
+#include <ctype.h>
 
 static SDL_Window *g_win; static SDL_Renderer *g_ren; static SDL_Texture *g_tex;
 static int g_quit, g_dump_at = -1; static const char *g_dump_file; static double s_dump_alpha = -1;
@@ -83,45 +85,65 @@ static void draw_notice(uint32_t *pix, int w)    /* small white text with a shad
     }
 }
 static void hint_box(int i) { if (!interp_speculating()) ui_hint_box(i); }    /* never from a run-ahead tick */
-static char s_notice_buf[48];
-static void smooth_notice(void)
+/* ---- the port's settings (config.h, HOCUS.CFG): options menu, and the F7 / F8 / F11 shortcuts ---- */
+#define CFG_PATH "HOCUS.CFG"
+static int s_cfg_save = 1;                        /* tests never read or write HOCUS.CFG */
+static int s_fps_cap;                             /* frames per second while smoothing, 0 = the display's rate */
+static int s_last_framerate = FR_DISPLAY;         /* what F11 returns to */
+static void view_changed(void);
+static void pad_remapped(void);
+static void apply_port(int save)
 {
-    if (!interp_enabled()) notice("SMOOTH: OFF");
-    else { snprintf(s_notice_buf, sizeof s_notice_buf, "SMOOTH: DISPLAY  RUN-AHEAD %d", interp_runahead()); notice(s_notice_buf); }
+    interp_set_view(g_port.wide, g_port.hud_off); view_changed();
+    interp_set_enabled(g_port.framerate != FR_ORIGINAL);
+    s_fps_cap = config_fps(g_port.framerate);
+    if (g_port.framerate != FR_ORIGINAL) s_last_framerate = g_port.framerate;
+    pad_remapped();
+    if (save && s_cfg_save) config_save(CFG_PATH);
 }
-static char s_view_buf[48];
+static void front_port_apply(void) { apply_port(1); }
+static char s_notice_buf[48];
 static void view_notice(void)
 {
-    snprintf(s_view_buf, sizeof s_view_buf, "VIEW: %s  HUD: %s", interp_wide() ? "WIDE 16:9" : "CLASSIC", interp_hud_off() ? "OFF" : "CLASSIC");
-    notice(s_view_buf);
+    snprintf(s_notice_buf, sizeof s_notice_buf, "ASPECT: %s  HUD: %s  FRAMERATE: %s", g_port.wide ? "16:9" : "4:3",
+             g_port.hud_off ? "OFF" : "CLASSIC", config_framerate_name(g_port.framerate));
+    for (char *c = s_notice_buf; *c; c++) *c = (char)toupper((unsigned char)*c);
+    notice(s_notice_buf);
 }
-static void toggle_wide(void) { interp_set_view(!interp_wide(), interp_hud_off()); view_notice(); }      /* F7 */
-static void toggle_hud(void)  { interp_set_view(interp_wide(), !interp_hud_off()); view_notice(); }      /* F8 */
-static void cycle_view(void)                      /* left stick click: classic -> wide -> wide, HUD off -> HUD off -> classic */
+static void toggle_wide(void) { g_port.wide = !g_port.wide; apply_port(1); view_notice(); }        /* F7 */
+static void toggle_hud(void)  { g_port.hud_off = !g_port.hud_off; apply_port(1); view_notice(); }  /* F8 */
+static void toggle_smooth(void)                                                                     /* F11 */
 {
-    int w = interp_wide(), h = interp_hud_off();
-    if (!w && !h) w = 1; else if (w && !h) h = 1; else if (w && h) w = 0; else h = 0;
-    interp_set_view(w, h); view_notice();
-}
-static void cycle_runahead(void)                  /* F12: 0 -> 1 -> 2 -> 0 (turns smoothing on) */
-{
-    if (!interp_enabled()) interp_set_enabled(1);
-    else interp_set_runahead((interp_runahead() + 1) % 3);
-    smooth_notice();
-}
-static void toggle_smooth(void)
-{
-    interp_set_enabled(!interp_enabled());
-    smooth_notice();
+    g_port.framerate = g_port.framerate != FR_ORIGINAL ? FR_ORIGINAL : s_last_framerate;
+    apply_port(1); view_notice();
 }
 
+static void side_stars(int w)                    /* wide menus: the starfield beyond the VGA page (frontend.c) */
+{
+    static unsigned last_steps; static Uint32 last_change;
+    Uint32 now = SDL_GetTicks();
+    if (g_front_side_steps != last_steps) { last_steps = g_front_side_steps; last_change = now; }
+    if (now - last_change > 1000) return;          /* no starfield running: nothing at the sides */
+    int ox = (w - 320) / 2;
+    for (int y = 0; y < 200; y++)
+        for (int x = 0; x < w && x < FRONT_SIDE_W; x++) {
+            if (x == ox) x += 320;
+            uint8_t c = x < FRONT_SIDE_W ? g_front_side[y][x] : 0;
+            if (!c) continue;
+            uint32_t r = vga_palette(c, 0), g = vga_palette(c, 1), b = vga_palette(c, 2);
+            r = (r << 2) | (r >> 4); g = (g << 2) | (g >> 4); b = (b << 2) | (b >> 4);
+            g_pix[y * w + x] = r | (g << 8) | (b << 16) | 0xFF000000u;
+        }
+}
 static int compose(void)                          /* the picture to show into g_pix; returns its width */
 {
     int w = 320;
-    if (interp_render(g_pix, &w) || interp_compose_vga(g_pix, &w, !s_menu_screen)) return w;
+    if (interp_render(g_pix, &w)) return w;
+    if (interp_compose_vga(g_pix, &w, !s_menu_screen)) { if (s_menu_screen && w > 320) side_stars(w); return w; }
     vga_render_rgba(g_pix);
     return 320;
 }
+static void view_changed(void) { g_front_wide_extra = (interp_view_width() - 320) / 2; frontend_side_clear(); }
 static int s_tex_w;
 static void set_tex_width(int w)                  /* texture w x 200 shown at w x 240 (200 rows stretched, as on a CRT) */
 {
@@ -154,11 +176,12 @@ static int menu_key(void) { if (!s_kqn) return 0; int k = s_kq[0]; memmove(s_kq,
 static int s_tq[64], s_tqn;                      /* typed characters (name entry) */
 static void tq_push(int c) { if (s_tqn < 64) s_tq[s_tqn++] = c; }
 static int text_key(void) { if (!s_tqn) return 0; int c = s_tq[0]; memmove(s_tq, s_tq + 1, (--s_tqn) * sizeof(int)); return c; }
-static void menu_flush(void) { s_kqn = 0; s_tqn = 0; }
+static int s_padq_n;
+static void menu_flush(void) { s_kqn = 0; s_tqn = 0; s_padq_n = 0; }
 static void pad_open_first(void); static void pad_release_all(void); static void pad_button(int b, int down); static void pad_axis(int a, int v);
 static SDL_GameController *s_pad;
 static void pad_script_step(void);
-static void toggle_smooth(void); static void cycle_runahead(void); static void toggle_wide(void); static void toggle_hud(void); static void cycle_view(void);
+static void toggle_smooth(void); static void toggle_wide(void); static void toggle_hud(void);
 
 /* Tap latching (with smoothing on): a key pressed and released between two ticks would never be seen by the
  * game (the original reads key states once per tick).  Its release is held back until the next tick has run. */
@@ -202,7 +225,6 @@ static void pump(void)
                 SDL_SetWindowFullscreen(g_win, f ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP); continue;
             }
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11) { toggle_smooth(); continue; }
-            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F12) { cycle_runahead(); continue; }
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F7) { toggle_wide(); continue; }
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F8) { toggle_hud(); continue; }
             if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && (e.key.keysym.scancode == SDL_SCANCODE_F7 || e.key.keysym.scancode == SDL_SCANCODE_F8 ||
@@ -223,31 +245,28 @@ static void pump(void)
 }
 
 /* ---- game controller (SDL GameController: Xbox-style layout, so the Steam Deck and most pads work) ----
- * Each pad input drives a virtual button; a virtual button behaves like pressing a key: it sends the DOS
- * scancode of the key currently bound to its action (so "Define keys" still applies), counts as a key press
- * for "press any key" screens, and queues a menu key.  Several pad inputs can drive one virtual button
- * (D-pad and stick, A and LT): the button is down while any of them is held.
- *   D-pad / left stick   move, up = doors/up, down = down       menus: navigate, left/right = sliders
- *   A, LT                jump                                   menus: select
- *   X, B, RT             fire                                   menus: B = back
- *   LB / RB, right stick look up / down (the scroll keys)       text pages: page up / down
- *   Start                Esc: open / close the in-game menu     Back/View  pause */
-enum { VB_LEFT, VB_RIGHT, VB_UP, VB_DOWN, VB_JUMP, VB_FIRE, VB_LOOKUP, VB_LOOKDN, VB_BACK, VB_START, VB_PAUSE, VB_COUNT };
-static uint32_t s_vb_src[VB_COUNT];               /* bit per pad input holding the virtual button */
+ * Game actions: each pad input drives a virtual button; a virtual button behaves like pressing a key: it sends the
+ * DOS scancode of the key currently bound to its action (so Keyboard Remap still applies) and counts as a key press
+ * for "press any key" screens.  Several inputs can hold one virtual button (D-pad and stick, A and LT): it is down
+ * while any of them is.  Jump / fire / look up / look down / pause come from Controller Remap (g_port.pad, config.h);
+ * B (fire), LT (jump) and RT (fire) work as extras while not assigned to anything.  Fixed: D-pad / left stick move,
+ * right stick looks, Menu (Start) = Esc (opens / closes the in-game menu).
+ * Menu keys are fixed per physical button: D-pad / stick navigate, A = Enter, B / Menu = Esc, LB / RB = page up / down. */
+enum { VB_LEFT, VB_RIGHT, VB_UP, VB_DOWN, VB_JUMP, VB_FIRE, VB_LOOKUP, VB_LOOKDN, VB_PAUSE, VB_START, VB_COUNT };
+static uint64_t s_vb_src[VB_COUNT];               /* bit per pad input holding the virtual button */
 static int s_axis[SDL_CONTROLLER_AXIS_MAX];       /* -1 / 0 / +1 per axis after the dead zone */
+static int s_padq[8];                             /* raw button presses for Controller Remap (g_front.pad_button) */
 
 static void vb_emit(int vb, int down)
 {
-    static const int act[VB_COUNT] = { ACT_LEFT, ACT_RIGHT, ACT_UP, ACT_DOWN, ACT_JUMP, ACT_FIRE, ACT_SCROLL_UP, ACT_SCROLL_DOWN, ACT_FIRE, -1, -1 };
-    static const int mkey[VB_COUNT] = { FK_LEFT, FK_RIGHT, FK_UP, FK_DOWN, FK_ENTER, 0, FK_PGUP, FK_PGDN, FK_ESC, FK_ESC, 0 };
+    static const int act[VB_COUNT] = { ACT_LEFT, ACT_RIGHT, ACT_UP, ACT_DOWN, ACT_JUMP, ACT_FIRE, ACT_SCROLL_UP, ACT_SCROLL_DOWN, -1, -1 };
     uint8_t sc = act[vb] >= 0 ? g_key_scancode[g_binding[act[vb]]] : vb == VB_START ? 0x01 : 0x19;
-    if (down) { if (s_keys < 16) s_keys++; if (mkey[vb]) kq_push(mkey[vb]); }
     game_key(down ? sc : (uint8_t)(sc | 0x80));
 }
 static void vb_set(int vb, int src, int down)
 {
-    uint32_t was = s_vb_src[vb];
-    if (down) s_vb_src[vb] |= 1u << src; else s_vb_src[vb] &= ~(1u << src);
+    uint64_t was = s_vb_src[vb];
+    if (down) s_vb_src[vb] |= 1ull << src; else s_vb_src[vb] &= ~(1ull << src);
     if (!was != !s_vb_src[vb]) vb_emit(vb, s_vb_src[vb] != 0);
 }
 static void pad_release_all(void)
@@ -261,24 +280,46 @@ static void pad_open_first(void)
     for (int i = 0; i < SDL_NumJoysticks(); i++)
         if (SDL_IsGameController(i) && (s_pad = SDL_GameControllerOpen(i)) != NULL) return;
 }
-static void pad_button(int b, int down)
+static int pad_vb_for(int code)                   /* the remappable action a button / trigger drives, or -1 */
 {
-    switch (b) {                                  /* source ids: buttons 0..20, axes 24.. */
-    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  vb_set(VB_LEFT, b, down); break;
-    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: vb_set(VB_RIGHT, b, down); break;
-    case SDL_CONTROLLER_BUTTON_DPAD_UP:    vb_set(VB_UP, b, down); break;
-    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  vb_set(VB_DOWN, b, down); break;
-    case SDL_CONTROLLER_BUTTON_A:          vb_set(VB_JUMP, b, down); break;
-    case SDL_CONTROLLER_BUTTON_X:          vb_set(VB_FIRE, b, down); break;
-    case SDL_CONTROLLER_BUTTON_B:          vb_set(VB_BACK, b, down); break;
-    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  vb_set(VB_LOOKUP, b, down); break;
-    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: vb_set(VB_LOOKDN, b, down); break;
-    case SDL_CONTROLLER_BUTTON_START:      vb_set(VB_START, b, down); break;
-    case SDL_CONTROLLER_BUTTON_BACK:       vb_set(VB_PAUSE, b, down); break;
-    case SDL_CONTROLLER_BUTTON_RIGHTSTICK: if (down) toggle_smooth(); break;    /* R3: smoothing on / off */
-    case SDL_CONTROLLER_BUTTON_LEFTSTICK:  if (down) cycle_view(); break;       /* L3: classic / wide / wide + HUD off / HUD off */
+    static const int vb[PAD_ACTIONS] = { VB_JUMP, VB_FIRE, VB_LOOKUP, VB_LOOKDN, VB_PAUSE };
+    for (int a = 0; a < PAD_ACTIONS; a++) if (g_port.pad[a] == code) return vb[a];
+    if (code == SDL_CONTROLLER_BUTTON_B) return VB_FIRE;          /* extras while unassigned */
+    if (code == PAD_LT) return VB_JUMP;
+    if (code == PAD_RT) return VB_FIRE;
+    return -1;
+}
+static void pad_input(int code, int down)         /* a button or trigger (code as config.h) */
+{
+    if (down && s_keys < 16) s_keys++;
+    if (down && s_padq_n < 8) s_padq[s_padq_n++] = code;
+    if (down) {                                   /* fixed menu keys */
+        int mk = code == SDL_CONTROLLER_BUTTON_A ? FK_ENTER : code == SDL_CONTROLLER_BUTTON_B ? FK_ESC :
+                 code == SDL_CONTROLLER_BUTTON_START ? FK_ESC : code == SDL_CONTROLLER_BUTTON_LEFTSHOULDER ? FK_PGUP :
+                 code == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER ? FK_PGDN : code == SDL_CONTROLLER_BUTTON_DPAD_UP ? FK_UP :
+                 code == SDL_CONTROLLER_BUTTON_DPAD_DOWN ? FK_DOWN : code == SDL_CONTROLLER_BUTTON_DPAD_LEFT ? FK_LEFT :
+                 code == SDL_CONTROLLER_BUTTON_DPAD_RIGHT ? FK_RIGHT : 0;
+        if (mk) kq_push(mk);
+    }
+    switch (code) {
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  vb_set(VB_LEFT, code, down); return;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: vb_set(VB_RIGHT, code, down); return;
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:    vb_set(VB_UP, code, down); return;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  vb_set(VB_DOWN, code, down); return;
+    case SDL_CONTROLLER_BUTTON_START:      vb_set(VB_START, code, down); return;
     default: break;
     }
+    int vb = pad_vb_for(code);
+    if (vb >= 0) vb_set(vb, code, down);
+}
+static void pad_button(int b, int down) { pad_input(b, down); }
+static void pad_remapped(void) { pad_release_all(); }   /* bindings changed: nothing stays held under an old one */
+static int front_pad_button(void)
+{
+    if (!s_padq_n) return -1;
+    int c = s_padq[0];
+    memmove(s_padq, s_padq + 1, (size_t)--s_padq_n * sizeof s_padq[0]);
+    return c;
 }
 static void pad_axis(int a, int v)
 {
@@ -289,14 +330,21 @@ static void pad_axis(int a, int v)
     else
         st = v < (prev < 0 ? -11500 : -16400) ? -1 : v > (prev > 0 ? 11500 : 16400) ? 1 : 0;
     if (st == prev) return;
+    int was = prev;
     s_axis[a] = st;
-    int src = 24 + a;
+    int src = 24 + a;                             /* sticks: sources 24..27 (buttons are 0..20, triggers 40 / 41) */
     switch (a) {
-    case SDL_CONTROLLER_AXIS_LEFTX:  vb_set(VB_LEFT, src, st < 0); vb_set(VB_RIGHT, src, st > 0); break;
-    case SDL_CONTROLLER_AXIS_LEFTY:  vb_set(VB_UP, src, st < 0);   vb_set(VB_DOWN, src, st > 0); break;
+    case SDL_CONTROLLER_AXIS_LEFTX:
+        if (st && st != was) kq_push(st < 0 ? FK_LEFT : FK_RIGHT);
+        if (st && s_keys < 16) s_keys++;
+        vb_set(VB_LEFT, src, st < 0); vb_set(VB_RIGHT, src, st > 0); break;
+    case SDL_CONTROLLER_AXIS_LEFTY:
+        if (st && st != was) kq_push(st < 0 ? FK_UP : FK_DOWN);
+        if (st && s_keys < 16) s_keys++;
+        vb_set(VB_UP, src, st < 0); vb_set(VB_DOWN, src, st > 0); break;
     case SDL_CONTROLLER_AXIS_RIGHTY: vb_set(VB_LOOKUP, src, st < 0); vb_set(VB_LOOKDN, src, st > 0); break;
-    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:  vb_set(VB_JUMP, src, st); break;
-    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: vb_set(VB_FIRE, src, st); break;
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:  pad_input(PAD_LT, st); break;
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: pad_input(PAD_RT, st); break;
     default: break;
     }
 }
@@ -344,6 +392,7 @@ static void idle(void)                        /* called while the frame timer wa
     if (interp_enabled() && interp_ready()) {     /* smoothing: a new picture every display refresh (vsync paces it) */
         static Uint64 last; Uint64 now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
         if (last && (now - last) * 1000 < f * 4) { SDL_Delay(1); return; }    /* no vsync: at most ~250 per second */
+        if (last && s_fps_cap && (now - last) * (Uint64)s_fps_cap < f) { SDL_Delay(1); return; }   /* 30 / 60 / 120 fps */
         last = now; present(); s_last_start = vga_get_start();
         return;
     }
@@ -497,6 +546,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) s_script = argv[++i];
         else if (!strcmp(argv[i], "--pad") && i + 1 < argc) s_pad_script = argv[++i];
         else if (!strcmp(argv[i], "--smooth")) smooth = 1;
+        else if (!strcmp(argv[i], "--pad-map") && i + 1 < argc) i++;     /* applied after the config (below) */
         else if (!strcmp(argv[i], "--wide")) wide = 1;
         else if (!strcmp(argv[i], "--hud-off")) hudoff = 1;
         else if (!strcmp(argv[i], "--dump-poll") && i + 1 < argc) s_dump_poll = atoi(argv[++i]);
@@ -513,6 +563,22 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "usage: %s [--dat HOCUS.DAT] [--episode 0..3] [--level 0..8] [--scale N] [--fullscreen] [--smooth] [--runahead 0..2] [--wide] [--hud-off] [--frames N --dump out.ppm]\n", argv[0]); return 2; }
     }
     if (frames >= 0 && g_dump_file) g_dump_at = frames;
+    /* the port's settings: HOCUS.CFG, then the command line on top (not saved unless changed in the menu);
+     * test runs (dumps, scripted input) use the defaults with smoothing off and never touch the file */
+    if (g_dump_file || s_script || s_pad_script || s_check || s_hash_f) { s_cfg_save = 0; config_defaults(); g_port.framerate = FR_ORIGINAL; }
+    else config_load(CFG_PATH);
+    if (wide) g_port.wide = 1;
+    if (hudoff) g_port.hud_off = 1;
+    for (int i = 1; i + 1 < argc; i++)                /* --pad-map jump=Y (tests): a Controller Remap binding */
+        if (!strcmp(argv[i], "--pad-map")) {
+            static const char *an[PAD_ACTIONS] = { "jump", "fire", "look_up", "look_down", "pause" };
+            char k[32] = ""; const char *eq = strchr(argv[i + 1], '=');
+            if (eq && eq - argv[i + 1] < 31) { memcpy(k, argv[i + 1], (size_t)(eq - argv[i + 1])); k[eq - argv[i + 1]] = 0; }
+            for (int a = 0; a < PAD_ACTIONS; a++)
+                for (int b = 0; b <= PAD_RT; b++)
+                    if (eq && !strcmp(k, an[a]) && !strcmp(eq + 1, config_pad_name(b)) && config_pad_assignable(b)) g_port.pad[a] = b;
+        }
+    if (smooth) g_port.framerate = FR_DISPLAY;
     if (dat_open(dat)) { char m[512]; snprintf(m, sizeof m, "Cannot open %s.\nCopy HOCUS.DAT from the registered Hocus Pocus v1.1 next to the program, or use --dat.", dat); fatal(m); return 1; }
     { const char *err = dat_check(); if (err) { fatal(err); return 1; } }
     uint32_t n6; uint8_t *r6 = dat_load(6, &n6);
@@ -523,12 +589,12 @@ int main(int argc, char **argv)
 
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");   /* A = bottom face button on every pad (Nintendo layouts too) */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
-    g_win = SDL_CreateWindow("Hocus Pocus", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (wide ? 426 : 320) * scale, 240 * scale,
+    g_win = SDL_CreateWindow("Hocus Pocus", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (g_port.wide ? 426 : 320) * scale, 240 * scale,
                              SDL_WINDOW_RESIZABLE | (full ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     g_ren = g_win ? SDL_CreateRenderer(g_win, -1, SDL_RENDERER_PRESENTVSYNC) : NULL;
     if (!g_ren && g_win) g_ren = SDL_CreateRenderer(g_win, -1, 0);
     if (!g_ren) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
-    s_tex_w = 0; set_tex_width(wide ? 426 : 320);
+    s_tex_w = 0; set_tex_width(g_port.wide ? 426 : 320);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
 
     { SDL_AudioSpec want, have; SDL_zero(want); want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 1; want.samples = 1024; want.callback = audio_cb;
@@ -547,7 +613,7 @@ int main(int argc, char **argv)
     g_loop_hooks.message = ui_message; g_loop_hooks.palette_entry = pal_entry;
     rng_set_index(0); stars_init();
     g_loop_hooks.frame = frame_hook; g_loop_hooks.quit_menu = quit_menu; g_loop_hooks.menu_f1 = f_help; g_loop_hooks.menu_f2 = f_save; g_loop_hooks.menu_f3 = f_load; g_loop_hooks.menu_f10 = f_quit; g_loop_hooks.menu_v = f_vol; g_loop_hooks.pause_game = pause_game; g_loop_hooks.end_screen = end_screen; g_loop_hooks.wait_key = wait_key;
-    interp_install(); interp_set_view(wide, hudoff); interp_set_enabled(smooth); interp_set_runahead(runahead); interp_set_check(s_check);
+    interp_install(); apply_port(0); interp_set_runahead(runahead); interp_set_check(s_check);
     s_tick_shown_inner = g_loop_hooks.tick_shown; g_loop_hooks.tick_shown = tick_shown_main;
     g_difficulty = 1; g_game_speed = 0; g_joy_enabled = 0; g_lv.mana = 1;
     g_episode = (int16_t)episode; g_lv.level_icon = (int16_t)level;
@@ -556,6 +622,7 @@ int main(int argc, char **argv)
     if (end_test >= 0) { pal_entry(DAT_PAL_LO, 0); pal_entry(DAT_PAL_HI, 128); g_exit_clock = 140 * 100; ui_end_screen(end_test, 12, 9); SDL_Quit(); return 0; }
     g_front.key = menu_key; g_front.pace = front_pace; g_front.quit = front_quit; g_front.music = play_music; g_front.music_off = stop_music;
     g_front.pal = pal_entry; g_front.img = ui_img; g_front.flush_keys = menu_flush; g_front.apply_volume = apply_volume; g_front.sfx = play_sfx; g_front.ticks = SDL_GetTicks; g_front.text = text_key; g_front.voc = play_voc;
+    g_front.port_apply = front_port_apply; g_front.pad_button = front_pad_button;
     if (test_screen) {                                /* --test-screen endN | hs: show one front-end screen (with --keys / --frames / --dump) */
         pal_entry(DAT_PAL_LO, 0); pal_entry(DAT_PAL_HI, 128);
         if (!strcmp(test_screen, "demo")) frontend_demo();

@@ -32,6 +32,10 @@ typedef struct {
     int cam_x, cam_row, cam_col, col_odd;
     uint32_t tick;                                /* timer_last() of the tick that drew it */
     int16_t cells[SNAP_W * SNAP_H];
+    /* lift platforms: foreground tiles the game moves a whole cell per tick with the player on them.  Their cells
+     * above hold what lies behind; the tiles are drawn as moving objects, blended like the player. */
+    int nlift;
+    struct { int16_t col, row; uint8_t tile; } lift[32];
     /* the packed tile graphics (page 2 up to the sprite pixels), copied at draw time: the original's unclipped
      * player blit can run past the bottom of page 1 into them (falling off the screen), and on DOS the
      * damage only shows from the next frame on */
@@ -132,10 +136,22 @@ static void tick_begin(void)
     f->valid = 1; f->nosmooth = 0; f->flash = g_lv.flash != 0 ? 0x77 - g_lv.flash : -1; f->n = 0;
     f->cam_x = g_cam.cam_x; f->cam_row = g_cam.cam_row; f->cam_col = g_cam.cam_col; f->col_odd = g_cam.col_odd;
     f->tick = timer_last();
+    f->nlift = 0;
     set_view_ext();
     for (int r = 0; r < SNAP_H; r++)
         for (int c = 0; c < SNAP_W; c++)
-            f->cells[r * SNAP_W + c] = (int16_t)live_cell(f->cam_col - SNAP_ML + c, f->cam_row - SNAP_MT + r);
+        {
+            int cx = f->cam_col - SNAP_ML + c, cy = f->cam_row - SNAP_MT + r;
+            int v = live_cell(cx, cy);
+            if (v >= 0 && g_mv.plat_tile_b != -1 && (v == g_mv.plat_tile_a || v == g_mv.plat_tile_b) &&
+                g_map.fg[cy * MAP_WIDTH + cx] == v && f->nlift < 32) {
+                f->lift[f->nlift].col = (int16_t)cx; f->lift[f->nlift].row = (int16_t)cy; f->lift[f->nlift].tile = (uint8_t)v;
+                f->nlift++;
+                int b = g_map.bg[cy * MAP_WIDTH + cx];
+                v = b != 0xFF ? b : -1;                    /* what the lift covers */
+            }
+            f->cells[r * SNAP_W + c] = (int16_t)v;
+        }
     f->tile_bytes = g_spr.page_off < VIDEO_PAGE_STRIDE ? g_spr.page_off : VIDEO_PAGE_STRIDE;
     for (int p = 0; p < 4; p++)
         for (uint16_t i = 0; i < f->tile_bytes; i++) f->tiles[p][i] = vga_plane(p)[(uint16_t)(g_spr.src_off + i)];
@@ -316,6 +332,31 @@ static void render_pair(uint8_t *out, int W, int PH, const Frame *A, const Frame
     int sxo = view_shift(cmx, ox, MAP_PX_W, W), syo = view_shift(csy, (PH - 160) / 2, MAP_PX_H, PH);
     if (B->flash >= 0) memset(out, B->flash, (size_t)W * PH);       /* level_flash: one colour, sprites on top */
     else draw_world(out, W, PH, B, cmx + sxo, csy + syo, bdx + sxo);
+
+    /* lift platforms: matched with the previous tick's (same tile, same column, same or neighbouring row) */
+    for (int i = 0; i < B->nlift && B->flash < 0; i++) {
+        int col = B->lift[i].col, row = B->lift[i].row, t = B->lift[i].tile;
+        double wy = row * 16.0;
+        if (use_prev) {
+            int still = 0, from = -1;
+            for (int k = 0; k < p->nlift; k++) {
+                if (p->lift[k].col != col || p->lift[k].tile != t) continue;
+                if (p->lift[k].row == row) still = 1;
+                else if (p->lift[k].row == row - 1 || p->lift[k].row == row + 1) from = p->lift[k].row;
+            }
+            if (!still && from >= 0) wy = lerp(from * 16.0, row * 16.0, a);
+        }
+        int sx = col * 16 - (cmx + sxo), sy = iround(wy) - (csy + syo);
+        for (int ty = 0; ty < 16; ty++) {
+            int Y = sy + ty; if (Y < 0 || Y >= PH) continue;
+            uint16_t rel = (uint16_t)((t << 6) + ty * 4);
+            for (int tx = 0; tx < 16; tx++) {
+                int X = sx + tx; if (X < 0 || X >= W) continue;
+                out[Y * W + X] = (uint32_t)rel + 4 <= B->tile_bytes ? B->tiles[tx & 3][rel + (tx >> 2)]
+                                                                   : vga_plane(tx & 3)[(uint16_t)(g_spr.src_off + rel + (tx >> 2))];
+            }
+        }
+    }
 
     /* previous tick's tagged objects, by (tag, occurrence) */
     static int pidx[MAX_TAG][MAX_OCC], cnt[MAX_TAG];

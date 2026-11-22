@@ -8,6 +8,7 @@
 #include "enemy.h"
 #include "input.h"
 #include "dat.h"
+#include "config.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -25,11 +26,18 @@ static int32_t s_tx[360], s_ty[360];                   /* DS:4CA8 / 4CAC: DAT 5 
 static int16_t s_rad[NSPARK], s_ang[NSPARK];            /* DS:7AD6 / 7B6C */
 static uint8_t s_spd[NSPARK], s_col[NSPARK], s_inc[NSPARK];   /* DS:7A8A / 7A3F / 79F4 */
 static int s_spark_ready;
+/* port, wide view: stars fly on to the edges of the wide picture; those beyond the 320 columns of the VGA page go
+ * into g_front_side (wide coordinates, 0 = nothing), which the platform layer shows at the sides. */
+int g_front_wide_extra;
+uint8_t g_front_side[200][FRONT_SIDE_W];
+unsigned g_front_side_steps;
 static int spark_pos(int i, int *x, int *y)             /* returns non-zero when the point is outside the screen */
 {
     *x = (int)((int32_t)s_rad[i] * s_tx[s_ang[i]] / 1000000) + 0xA0; *y = (int)((int32_t)s_rad[i] * s_ty[s_ang[i]] / 1000000) + 0x70;
-    return *x < 0 || *x > 0x13F || *y < 0 || *y > 0xC7;
+    return *x < -g_front_wide_extra || *x > 0x13F + g_front_wide_extra || *y < 0 || *y > 0xC7;
 }
+static int side_x(int x) { return x + g_front_wide_extra; }
+void frontend_side_clear(void) { memset(g_front_side, 0, sizeof g_front_side); }
 static void spark_respawn(int i, int *x, int *y)
 {
     do { s_ang[i] = (int16_t)(rand() % 360); s_rad[i] = (int16_t)(rand() % 0xA0); } while (spark_pos(i, x, y));
@@ -47,16 +55,22 @@ void sparkles_init(void)
     for (int i = 0; i < NSPARK; i++) { int x, y; spark_respawn(i, &x, &y); }
     s_spark_ready = 1;
 }
+/* a sparkle screen ends: fade out (the side stars fade with it), then the side stars go */
+static void menu_fade_out(void) { video_pal_fade_out(0x14); frontend_side_clear(); }
+
 static void sparkles_step(void)
 {
     if (!s_spark_ready) return;
+    g_front_side_steps++;
     for (int i = 0; i < NSPARK; i++) {
         int x, y; spark_pos(i, &x, &y);
-        if (video_get_pixel(x, y) >= 0xF0) video_put_pixel(x, y, 0);
+        if (x < 0 || x > 0x13F) { if (side_x(x) >= 0 && side_x(x) < FRONT_SIDE_W) g_front_side[y][side_x(x)] = 0; }
+        else if (video_get_pixel(x, y) >= 0xF0) video_put_pixel(x, y, 0);
         s_rad[i] = (int16_t)(s_rad[i] + s_spd[i]);
         s_col[i] = (uint8_t)(s_col[i] + s_inc[i]); if (s_col[i] > 0x7F) s_col[i] = 0x7F;
         if (spark_pos(i, &x, &y)) spark_respawn(i, &x, &y);
-        if (video_get_pixel(x, y) == 0) video_put_pixel(x, y, 0xF0 + (s_col[i] >> 3));
+        if (x < 0 || x > 0x13F) { if (side_x(x) >= 0 && side_x(x) < FRONT_SIDE_W) g_front_side[y][side_x(x)] = (uint8_t)(0xF0 + (s_col[i] >> 3)); }
+        else if (video_get_pixel(x, y) == 0) video_put_pixel(x, y, 0xF0 + (s_col[i] >> 3));
     }
 }
 
@@ -71,13 +85,18 @@ static const char *k_skill[] = { "Choose a skill level", "Easy game - good for b
 static const char *k_game[]  = { "How to play Hocus Pocus", "Abandon level & restart", "Save this game", "Restore an old game", "Change game options",
                                  "Back to the action!", "Quit to Main Menu" };
 static const char *k_speed[] = { "Select Game Speed", "Slow", "Medium", "Fast" };
+/* the port's option lists, styled like the speed list */
+static const char *k_hud[]    = { "Select HUD Style", "Classic", "Off" };
+static const char *k_aspect[] = { "Select Aspect Ratio", "Classic (4:3)", "Widescreen (16:9)" };
+static const char *k_frate[]  = { "Select Framerate", "Original", "30 fps", "60 fps", "120 fps", "Display rate" };
+static const char *k_padact[PAD_ACTIONS] = { "Jump", "Fire", "Look up", "Look down", "Pause" };
 static const char k_hint[] = "Use UP/DOWN/LETTER to move - ENTER to select";
 
 static struct {                       /* 0B21 state: DS:7C0C table, 7C0A count, 7C08 first-selectable flag, 7C06 title flag */
     const char *item[MAXITEMS]; int count, first, title;
 } m;
-static char s_opt[6][32];             /* the dynamic option strings (DS buffers) */
-static int  s_sel[8];                 /* remembered selection per menu (DS:1A04, 1A3C, 1A26, 1A56, 1A80, 1A92, 1AD0) */
+static char s_opt[10][32];            /* the dynamic option strings (DS buffers; the port's options added) */
+static int  s_sel[MENU_COUNT];        /* remembered selection per menu (DS:1A04, 1A3C, 1A26, 1A56, 1A80, 1A92, 1AD0; 8.. the port's) */
 static int  s_cur_id, s_cur;          /* DS:82CA menu id, DS:82CE current selection */
 static int  s_row[MAXITEMS], s_nsel;  /* DS:82D0 row table, DS:82CC selectable count */
 static int  s_barx;                   /* DS:82F8 byte column of the marker */
@@ -91,12 +110,25 @@ static void menu_setup(int id)        /* 06B8:0B21 */
     s_cur_id = id;
     switch (id) {
     case MENU_MAIN:    set_items(k_main, 8, 0, 0); break;
-    case MENU_OPTIONS:
+    case MENU_OPTIONS:                /* the original's six, with the port's video options; joystick -> controller remap */
         snprintf(s_opt[0], sizeof s_opt[0], "Sound is now %s", g_sound_on ? "on" : "off");
         snprintf(s_opt[1], sizeof s_opt[1], "Music is now %s", g_music_on ? "on" : "off");
-        snprintf(s_opt[3], sizeof s_opt[3], "Joystick is now %s", g_joy_enabled ? "on" : "off");
-        strcpy(s_opt[2], "Volume control"); strcpy(s_opt[4], "Game playing speed"); strcpy(s_opt[5], "Define key controls");
-        { static const char *it[6]; for (int i = 0; i < 6; i++) it[i] = s_opt[i]; set_items(it, 6, 1, 0); } break;
+        strcpy(s_opt[2], "Volume control~");
+        snprintf(s_opt[3], sizeof s_opt[3], "HUD style: %s", g_port.hud_off ? "Off" : "Classic");
+        snprintf(s_opt[4], sizeof s_opt[4], "Aspect ratio: %s", g_port.wide ? "16:9" : "4:3");
+        snprintf(s_opt[5], sizeof s_opt[5], "Framerate: %s~", config_framerate_name(g_port.framerate));
+        strcpy(s_opt[6], "Game playing speed"); strcpy(s_opt[7], "Keyboard remap"); strcpy(s_opt[8], "Controller remap");
+        { static const char *it[9]; for (int i = 0; i < 9; i++) it[i] = s_opt[i]; set_items(it, 9, 1, 0); } break;
+    case MENU_HUD:       set_items(k_hud, 3, 1, 1); break;
+    case MENU_ASPECT:    set_items(k_aspect, 3, 1, 1); break;
+    case MENU_FRAMERATE: set_items(k_frate, 6, 1, 1); break;
+    case MENU_PAD: {                  /* controller remap: one line per action with its button */
+        static char l[PAD_ACTIONS][32]; static const char *it[PAD_ACTIONS + 2];
+        it[0] = "Select an action to remap";
+        for (int a = 0; a < PAD_ACTIONS; a++) { snprintf(l[a], sizeof l[a], "%s - %s", k_padact[a], config_pad_name(g_port.pad[a])); it[a + 1] = l[a]; }
+        it[PAD_ACTIONS + 1] = "Reset to defaults";
+        set_items(it, PAD_ACTIONS + 2, 1, 1); break;
+    }
     case MENU_EPISODE: set_items(k_ep, 5, 1, 1); break;
     case MENU_LEVEL:   set_items(k_level, 10, 1, 1); break;
     case MENU_SKILL:   set_items(k_skill, 4, 1, 1); break;
@@ -162,12 +194,12 @@ static int menu_run(int main_flag)    /* 06B8:2259 */
         if (k) idle0 = g_front.ticks ? g_front.ticks() : 0;
         if (main_flag && g_front.ticks && !g_skip_intro && g_front.ticks() - idle0 > 32143) {      /* DS:790A:7908 > 0x1194 ticks of 140 Hz */
             if (!idled) { attract_pages(); menu_setup(s_cur_id); menu_draw(); s_cur = s_sel[s_cur_id]; idle0 = g_front.ticks(); idled = 1; continue; }
-            video_pal_fade_out(0x14); return 0x9D;
+            menu_fade_out(); return 0x9D;
         }
         if (k == FK_UP)   { bar_clear(s_row[s_cur]); if (--s_cur < 0) s_cur = s_nsel - 1; s_sel[s_cur_id] = s_cur; }
         else if (k == FK_DOWN) { bar_clear(s_row[s_cur]); if (++s_cur >= s_nsel) s_cur = 0; s_sel[s_cur_id] = s_cur; }
-        else if (k == FK_ENTER) { video_pal_fade_out(0x14); return s_cur; }
-        else if (k == FK_ESC && m.first != 0) { video_pal_fade_out(0x14); return 0xFF; }
+        else if (k == FK_ENTER) { menu_fade_out(); return s_cur; }
+        else if (k == FK_ESC && m.first != 0) { menu_fade_out(); return 0xFF; }
         else if (k > 0 && k < 256 && k != FK_ESC) {
             int u = toupper(k), base = m.title ? 1 : 0;
             for (int i = base; i < m.count; i++)
@@ -243,7 +275,7 @@ static int page_nav(int page, int total)         /* 3F7D: new page, or -1 */
         else if ((k == FK_PGDN || k == FK_RIGHT || k == FK_DOWN) && page < total - 1) r = page + 1;
         else if (k == FK_HOME && page != 0) r = 0;
         else if (k == FK_END && page < total - 1) r = total - 1;
-        if (r != -2) { video_pal_fade_out(0x14); return r; }
+        if (r != -2) { menu_fade_out(); return r; }
     }
 }
 static void paged(int first_entry, int total, void (*draw)(int, int))
@@ -257,7 +289,7 @@ void frontend_hints(void)    { s_img_tab = k_hint_img; paged(0x34, 10, hint_page
 void frontend_how_to_play(int in_game)           /* 44CC */
 {
     int vis = video_visible_page(), drw = video_draw_page(); uint8_t pal[768];
-    if (in_game) { video_pal_fade_out(0x14); memcpy(pal, video_target_palette(), 768); }
+    if (in_game) { menu_fade_out(); memcpy(pal, video_target_palette(), 768); }
     video_pal_set_black(); load_menu_palette(); video_pal_set_black();
     video_set_draw_page(0); video_clear_draw_page(); video_show_page_now(0);
     for (int p = 0; p < 5; p++) {
@@ -266,7 +298,7 @@ void frontend_how_to_play(int in_game)           /* 44CC */
         video_load_pcx(d, n, 0); free(d);
         video_pal_fade_in(0x14);
         if (g_front.flush_keys) g_front.flush_keys();
-        int k = key_wait(); video_pal_fade_out(0x14);
+        int k = key_wait(); menu_fade_out();
         if (!k || k == FK_ESC) break;
     }
     if (in_game) { memcpy(video_target_palette(), pal, 768); video_copy_page(0, 1); video_show_page_now(vis); video_set_draw_page(drw); video_pal_fade_in(1); }
@@ -354,7 +386,7 @@ void hs_view(void)                               /* 2018(0) */
         hs_screen_begin(ep); hs_rows(ep); hs_frame("Press any key to continue");
         video_pal_fade_in(0x14);
         if (g_front.flush_keys) g_front.flush_keys();
-        int k = key_wait(); video_pal_fade_out(0x14);
+        int k = key_wait(); menu_fade_out();
         if (!k || k == FK_ESC) break;
     }
     video_pal_set_black(); load_menu_palette();
@@ -372,10 +404,10 @@ void hs_enter(int ep, int pos)                   /* 1C9B */
         text_draw_grad(0x1B, y, st, name);
         char cur[2] = { '_', 0 }; text_draw_grad(text_width(name) + 0x1B, y, 2, cur);
         for (;;) {
-            if (g_front.quit && g_front.quit()) { video_pal_fade_out(0x14); return; }
+            if (g_front.quit && g_front.quit()) { menu_fade_out(); return; }
             int c = g_front.text ? g_front.text() : 0, k = g_front.key ? g_front.key() : 0, len = (int)strlen(name);
             if (!c && !g_front.text && k >= 0x20 && k <= 0x7A) c = k;
-            if (k == FK_ENTER) { video_clear_pixels(0x1B, y, 0x122, y + 9); { char sc[16]; snprintf(sc, sizeof sc, "%u", (unsigned)get_score(ep, pos)); text_draw_grad(0x122 - text_width(sc), y, st, sc); } text_draw_grad(0x1B, y, st, name); settings_save(); video_pal_fade_out(0x14); return; }
+            if (k == FK_ENTER) { video_clear_pixels(0x1B, y, 0x122, y + 9); { char sc[16]; snprintf(sc, sizeof sc, "%u", (unsigned)get_score(ep, pos)); text_draw_grad(0x122 - text_width(sc), y, st, sc); } text_draw_grad(0x1B, y, st, name); settings_save(); menu_fade_out(); return; }
             if (k == FK_BKSP && len > 0) { name[len - 1] = 0; break; }
             if (c >= 0x20 && c <= 0x7A && len < 25) { name[len] = (char)c; name[len + 1] = 0; break; }
             if (g_front.pace) g_front.pace();
@@ -390,7 +422,7 @@ void frontend_episode_end(int ep)
     video_set_draw_page(0); video_clear_draw_page(); video_set_draw_page(1); video_clear_draw_page(); video_set_draw_page(0);
     { uint32_t n; uint8_t *d = dat_load(4, &n); if (d) { video_load_pcx(d, n, 0); free(d); } }
     if (g_front.voc) g_front.voc(0x267);
-    video_show_page_now(0); video_pal_fade_in(0x3C); video_pal_fade_white(); video_pal_fade_out(0x14);
+    video_show_page_now(0); video_pal_fade_in(0x3C); video_pal_fade_white(); menu_fade_out();
     video_pal_set_black(); load_menu_palette();
     s_img_tab = &k_end_img[img0[ep]];
     paged(first[ep], count[ep], hint_page);
@@ -400,7 +432,7 @@ void frontend_episode_end(int ep)
         if (g_front.music) g_front.music(0x262, 0);
         video_pal_fade_in(0x14);
         if (g_front.flush_keys) g_front.flush_keys();
-        key_wait(); video_pal_fade_out(0x14);
+        key_wait(); menu_fade_out();
         video_pal_set_black(); load_menu_palette();
         if (g_front.music && g_music_on) g_front.music(MENU_MUSIC, 1);
     }
@@ -448,7 +480,7 @@ static void volume_screen(void)
         if (++tick > 50) tick = 0;
         if (g_front.pace) g_front.pace();
     }
-    settings_save(); video_pal_fade_out(0x14);
+    settings_save(); menu_fade_out();
 }
 
 /* ---------------------------------------------------------------- saved games (06B8:2B8B restore, 25CC save): 9 slots in HOCUS.SAV */
@@ -481,8 +513,8 @@ static int slot_pick(int save)                           /* returns the slot, or
         if (k == FK_UP)   { bar_clear(s_row[s_cur]); if (--s_cur < 0) s_cur = 8; s_slot_sel = s_cur; }
         else if (k == FK_DOWN) { bar_clear(s_row[s_cur]); if (++s_cur > 8) s_cur = 0; s_slot_sel = s_cur; }
         else if (k >= '1' && k <= '9') { bar_clear(s_row[s_cur]); s_cur = k - '1'; s_slot_sel = s_cur; }
-        else if (k == FK_ESC) { video_pal_fade_out(0x14); return -1; }
-        else if (k == FK_ENTER && (save || SLOT_EP(s_cur) != -1)) { video_pal_fade_out(0x14); return s_cur; }
+        else if (k == FK_ESC) { menu_fade_out(); return -1; }
+        else if (k == FK_ENTER && (save || SLOT_EP(s_cur) != -1)) { menu_fade_out(); return s_cur; }
         bar_draw(s_row[s_cur]);
         sparkles_step();
         if (g_front.pace) g_front.pace();
@@ -517,7 +549,7 @@ void frontend_save(void)
             if (g_front.quit && g_front.quit()) return;
             int c = g_front.text ? g_front.text() : 0, k = g_front.key ? g_front.key() : 0, len = (int)strlen(name);
             if (!c && !g_front.text && k >= 0x20 && k <= 0x7A) c = k;
-            if (k == FK_ESC) { video_pal_fade_out(0x14); return; }
+            if (k == FK_ESC) { menu_fade_out(); return; }
             if (k == FK_ENTER) { done = 1; break; }
             if (k == FK_BKSP && len > 0) { name[len - 1] = 0; break; }
             if (c >= 0x20 && c <= 0x7A && len < 24) { name[len] = (char)c; name[len + 1] = 0; break; }
@@ -529,7 +561,7 @@ void frontend_save(void)
     s_blk[0x30 + 2 * i] = (uint8_t)g_lv.level_icon; s_blk[0x31 + 2 * i] = 0;
     s_blk[0x42 + 2 * i] = (uint8_t)g_difficulty; s_blk[0x43 + 2 * i] = 0;
     { uint32_t v = g_score_saved; uint8_t *p = s_blk + 0x148 + 4 * i; p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
-    settings_save(); video_pal_fade_out(0x14);
+    settings_save(); menu_fade_out();
 }
 
 /* ---------------------------------------------------------------- define keys (06B8:17DA, 10AC) */
@@ -558,7 +590,7 @@ static void pick_key(int action)                  /* 10AC: choose a key for one 
         if (!k || k == FK_ESC) break;
         if (k >= 'A' && k <= 'R') { g_binding[action] = (uint8_t)(k - 'A'); break; }
     }
-    video_pal_fade_out(0x14);
+    menu_fade_out();
 }
 static void define_keys(void)
 {
@@ -575,8 +607,8 @@ static void define_keys(void)
         video_pal_fade_in(0x14);
         if (g_front.flush_keys) g_front.flush_keys();
         int k = key_wait();
-        if (!k || k == FK_ESC) { video_pal_fade_out(0x14); return; }
-        video_pal_fade_out(0x14);
+        if (!k || k == FK_ESC) { menu_fade_out(); return; }
+        menu_fade_out();
         if (k >= 'A' && k <= 'H') pick_key(k - 'A');
     }
 }
@@ -594,7 +626,7 @@ static int confirm_quit(void)
     if (g_front.flush_keys) g_front.flush_keys();
     int yes = 0;
     for (;;) { int k = key_wait(); if (!k || k == FK_ESC || k == 'N') break; if (k == 'Y') { yes = 1; break; } }
-    video_pal_fade_out(0x14);
+    menu_fade_out();
     return yes;
 }
 
@@ -602,7 +634,7 @@ static int confirm_quit(void)
 static int overlay(int (*fn)(void), int keep_black_on_result)
 {
     int vis = video_visible_page(), drw = video_draw_page(); uint8_t pal[768];
-    video_pal_fade_out(0x14); memcpy(pal, video_target_palette(), 768);
+    menu_fade_out(); memcpy(pal, video_target_palette(), 768);
     video_pal_set_black(); load_menu_palette();
     int r = fn();
     memcpy(video_target_palette(), pal, 768);
@@ -625,17 +657,77 @@ static void toggle_music(void)
     if (!g_music_on) { if (g_front.music_off) g_front.music_off(); }
     else if (g_front.music) g_front.music(MENU_MUSIC, 1);
 }
+/* port: a choice list (like the speed list), opened on the current value; returns the choice or -1 */
+static int choose(int id, int current)
+{
+    s_sel[id] = current;
+    int r = menu_show(id, 0);
+    return r == 0xFF ? -1 : r;
+}
+static void port_apply(void) { if (g_front.port_apply) g_front.port_apply(); }
+
+/* port: controller remap - the Define Keys screens, but picked with the menu marker so a controller can work it */
+static void pad_prompt(int action)
+{
+    char b[48];
+    video_pal_set_black(); video_set_draw_page(0); video_clear_draw_page(); video_show_page_now(0);
+    snprintf(b, sizeof b, "Press a button for: %s", k_padact[action]); centred(0x48, 5, b);
+    snprintf(b, sizeof b, "Currently %s", config_pad_name(g_port.pad[action])); centred(0x5C, 3, b);
+    centred(0x70, 2, "D-pad, stick and Menu stay fixed");
+    {
+        static const char h[] = "Press MENU or ESC to cancel";
+        if (g_front.img) g_front.img(9, 0, 0xB8);
+        shadowed((320 - text_width(h)) / 2, 0xBC, 4, h);
+        if (g_front.img) g_front.img(10, 0, 0);
+    }
+    video_pal_fade_in(0x14);
+    if (g_front.flush_keys) g_front.flush_keys();
+    for (;;) {
+        if (g_front.quit && g_front.quit()) break;
+        int k = g_front.key ? g_front.key() : 0;
+        if (k == FK_ESC) break;
+        int btn = g_front.pad_button ? g_front.pad_button() : -1;
+        if (btn == 6) break;                                  /* Menu (Start) */
+        if (btn >= 0 && config_pad_assignable(btn)) {
+            for (int a = 0; a < PAD_ACTIONS; a++)             /* a button does one thing: swap with its old action */
+                if (a != action && g_port.pad[a] == btn) g_port.pad[a] = g_port.pad[action];
+            g_port.pad[action] = btn;
+            port_apply();
+            break;
+        }
+        if (g_front.pace) g_front.pace();
+    }
+    menu_fade_out();
+    if (g_front.flush_keys) g_front.flush_keys();
+}
+static void pad_remap(void)
+{
+    for (;;) {
+        int r = menu_show(MENU_PAD, 0);
+        if (r == 0xFF || (g_front.quit && g_front.quit())) return;
+        if (r < PAD_ACTIONS) pad_prompt(r);
+        else {                                                /* reset to defaults (the other settings stay) */
+            PortSettings keep = g_port; config_defaults();
+            g_port.hud_off = keep.hud_off; g_port.wide = keep.wide; g_port.framerate = keep.framerate;
+            port_apply();
+        }
+    }
+}
+
 static void options_loop(void)
 {
     for (;;) {
-        int r = menu_show(MENU_OPTIONS, 0);
+        int r = menu_show(MENU_OPTIONS, 0), c;
         switch (r) {
         case 0: g_sound_on = !g_sound_on; break;
         case 1: toggle_music(); break;
         case 2: volume_screen(); break;
-        case 3: /* 2F16 joystick calibration: not ported (stays off) */ break;
-        case 4: { int s = menu_show(MENU_SPEED, 0); if (s != 0xFF) g_game_speed = (int16_t)s; break; }
-        case 5: define_keys(); break;
+        case 3: if ((c = choose(MENU_HUD, g_port.hud_off)) >= 0) { g_port.hud_off = c; port_apply(); } break;
+        case 4: if ((c = choose(MENU_ASPECT, g_port.wide)) >= 0) { g_port.wide = c; port_apply(); } break;
+        case 5: if ((c = choose(MENU_FRAMERATE, g_port.framerate)) >= 0) { g_port.framerate = c; port_apply(); } break;
+        case 6: if ((c = choose(MENU_SPEED, g_game_speed)) >= 0) g_game_speed = (int16_t)c; break;
+        case 7: define_keys(); break;
+        case 8: pad_remap(); break;
         default: settings_save(); return;
         }
         if (g_front.quit && g_front.quit()) return;
@@ -697,7 +789,7 @@ void frontend_intro(void)                         /* 0B97:0001 */
 {
     if (g_skip_intro) return;
     video_pal_fade_out(0x28); black_page0();
-    show_pcx(0x11); video_pal_fade_in(0x14); wait_ms(15000); video_pal_fade_out(0x14);
+    show_pcx(0x11); video_pal_fade_in(0x14); wait_ms(15000); menu_fade_out();
     black_page0(); show_pcx(1);
     if (g_front.music) g_front.music(0x257, 0);
     video_pal_fade_in(0x14); wait_ms(9000); video_pal_fade_out(0x1E);
@@ -712,7 +804,7 @@ void frontend_intro(void)                         /* 0B97:0001 */
 
 static void attract_pages(void)                   /* 06B8:42CB: two story pictures */
 {
-    video_pal_fade_out(0x14);
+    menu_fade_out();
     for (int i = 0; i < 2; i++) {
         show_pcx(0x17 + i); video_pal_fade_in(0x14);
         int key = wait_ms(2500); video_pal_fade_out(0xF);
@@ -761,7 +853,7 @@ int frontend_game_menu(void)          /* 06B8:4600 */
 {
     int vis = video_visible_page(), drw = video_draw_page();
     uint8_t pal[768]; memcpy(pal, video_target_palette(), 768);
-    video_pal_fade_out(0x14);
+    menu_fade_out();
     video_pal_set_black();
     load_menu_palette();
     int result = 0;
