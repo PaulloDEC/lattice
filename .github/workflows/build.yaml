@@ -34,3 +34,32 @@ jobs:
         with:
           name: hocus-linux
           path: port/hocus
+
+build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Installs MSYS2 and the 64-bit MinGW GCC compiler + SDL2 package
+      - name: Set up MSYS2 MinGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-SDL2
+
+      - name: Compile hocus for Windows
+        shell: msys2 {0}
+        working-directory: port
+        run: make CC=x86_64-w64-mingw32-gcc SDL_CONFIG=/mingw64/bin/sdl2-config -j$(nproc)
+
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: hocus-windows
+          path: port/hocus*
