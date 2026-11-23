@@ -829,6 +829,12 @@ run-ahead 0 vs 1 identical (E2L4, wide).
   `cam_x * 4 + floor((sxo - ox) / 2)` - identical to before away from edges and in the classic view (ox = sxo = 0).
   Measured at E1L1's start: the classic camera starts at ~tick 42, the wide view at tick 50; the backdrop now starts
   with the view.
+  *Follow-up (2026-11-23):* with smoothing on, the backdrop flickered by a pixel in that stretch, faster at higher
+  framerates: the camera term and the edge correction were each rounded to whole pixels, and between ticks their
+  roundings disagreed.  The origin is now computed from the view's left edge with one rounding:
+  `round((clamp(cam_x*8 blended - ox, 0, mapW - W) - ox) / 2)` (classic: = round(cam_x*4 blended), as before).
+  Checked: 35 captures over ticks 43..49 at 5 points between ticks - backdrop identical in all; afterwards it moves
+  monotonically; `--smooth-check` 598 ticks, 0 differences.
 * **Overlays at the start of a level (and generally).**  `interp_compose_vga` picks the frame drawn on the *shown*
   page (each frame records `page`): the latest finished tick, or the tick being drawn when its page is already up -
   E1L1's start-of-level picture (IMG 16, drawn into the frame being built, before any tick has finished) and anything

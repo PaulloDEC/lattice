@@ -329,13 +329,19 @@ static void render_pair(uint8_t *out, int W, int PH, const Frame *A, const Frame
     int csx = iround(lerp(p->cam_x * 8.0, B->cam_x * 8.0, a));
     int csy = iround(lerp(p->cam_row * 16.0, B->cam_row * 16.0, a));
     int cmx = iround(lerp(p->cam_col * 16.0 + p->col_odd * 8, B->cam_col * 16.0 + B->col_odd * 8, a));
-    int bdx = iround(lerp(p->cam_x * 4.0, B->cam_x * 4.0, a));
+    /* backdrop origin (half speed) from the view's left edge in one rounding: the view = the original camera
+     * moved out by ox and kept inside the map; at the map edge it stays put while the camera keeps moving.
+     * (Rounding the camera and the edge correction separately made it flicker by a pixel while blending.) */
+    double camf = lerp(p->cam_x * 8.0, B->cam_x * 8.0, a), vleft = camf - ox;
+    if (vleft > MAP_PX_W - W) vleft = MAP_PX_W - W;
+    if (vleft < 0) vleft = 0;
+    int bdx = iround((vleft - ox) / 2.0);
     /* the view around the original screen: centred, kept inside the map */
     int sxo = view_shift(cmx, ox, MAP_PX_W, W), syo = view_shift(csy, (PH - 160) / 2, MAP_PX_H, PH);
     if (B->flash >= 0) memset(out, B->flash, (size_t)W * PH);       /* level_flash: one colour, sprites on top */
     /* the backdrop scrolls with the view (half speed): where the view stops at a map edge, so does the backdrop,
      * though the original camera behind it may still be moving */
-    else draw_world(out, W, PH, B, cmx + sxo, csy + syo, bdx + (int)floor((sxo - ox) / 2.0));
+    else draw_world(out, W, PH, B, cmx + sxo, csy + syo, bdx);
 
     /* lift platforms: matched with the previous tick's (same tile, same column, same or neighbouring row) */
     for (int i = 0; i < B->nlift && B->flash < 0; i++) {
