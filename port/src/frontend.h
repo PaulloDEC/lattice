@@ -40,12 +40,15 @@ typedef struct FrontHooks {
     /* port: */
     void (*port_apply)(void);           /* g_port (config.h) changed: apply it and save HOCUS.CFG */
     int  (*pad_button)(void);           /* next controller button press (config.h codes), -1 = none */
+    int  (*display_max)(void);
+    int  sound_hw;                      /* an audio device is open (music needs one) */
+    int  (*gm_available)(void);         /* a SoundFont for General MIDI is next to the program */          /* the largest window multiple (2..8) that fits the current display */
 } FrontHooks;
 extern FrontHooks g_front;
 
 /* Menu ids of 06B8:0B21 */
 enum { MENU_MAIN, MENU_EPISODE, MENU_OPTIONS, MENU_LEVEL, MENU_SKILL, MENU_GAME, MENU_SPEED = 7,
-       MENU_HUD, MENU_ASPECT, MENU_FRAMERATE, MENU_PAD, MENU_COUNT };   /* 8.. the port's */
+       MENU_HUD, MENU_ASPECT, MENU_FRAMERATE, MENU_PAD, MENU_DISPLAY, MENU_MUSICDEV, MENU_COUNT };   /* 8.. the port's */
 
 /* 0B21 + 19A4 + 2259: returns the selected item (0-based, title excluded), 0xFF for Esc, 0x9D for the idle time-out. */
 int  menu_show(int id, int main_flag);

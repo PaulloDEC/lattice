@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Differential test: the MIDI sequencer (144e) + AdLib driver (161b) running as the ORIGINAL machine code in Unicorn vs port/src/music.c.
+Differential test (mono, Sound Blaster Pro and OPL3 stereo FM): the MIDI sequencer (144e) + AdLib driver (161b) running as the ORIGINAL machine code in Unicorn vs port/src/music.c.
 Both sides play the same random Standard MIDI File; compared tick by tick: every OPL register write (reg, value), every tempo/rate change,
 the 'playing' flag, plus random volume / pause / resume / stop operations in between.
 Stubs on the original: 161b:0001 (the single OPL write primitive) logs its arguments; the timer-task API (1505:501/5AA/5ED/601), malloc/free are replaced.
@@ -9,15 +9,16 @@ The fine-tune table (161b:0838, x87 pow) is not run: the port's table (trunc(pit
 import sys, struct, random, ctypes, subprocess, os
 here = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, '/home/claude/hocus'); sys.path.insert(0, here)
 src = here + '/../src/'
-subprocess.check_call(['gcc', '-shared', '-fPIC', '-O1', '-std=c11', '-o', here + '/libmusic.so', src + 'music.c', src + 'music_tables.c', src + 'opl.c', '-lm'])
+subprocess.check_call(['gcc', '-shared', '-fPIC', '-O1', '-std=c11', '-o', here + '/libmusic.so', src + 'music.c', src + 'music_tables.c', src + 'opl.c', src + 'gm.c', '-lm'])
 import diff_effects as de
 from diff_video import Orig, DS, BASE_SEG, STACK_SEG
 from unicorn.x86_const import *
 LM = ctypes.CDLL(here + '/libmusic.so')
-WR = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_int); RATE = ctypes.CFUNCTYPE(None, ctypes.c_int)
+WR = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_int, ctypes.c_int); RATE = ctypes.CFUNCTYPE(None, ctypes.c_int)
 LM.midi_play.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_int]
 LM.midi_set_volume.argtypes = [ctypes.c_int]
-S161B, S144E = 0x161B + BASE_SEG, 0x144E + BASE_SEG
+S161B, S144E, S1711 = 0x161B + BASE_SEG, 0x144E + BASE_SEG, 0x1711 + BASE_SEG
+BYTE = ctypes.CFUNCTYPE(None, ctypes.c_int)
 TBL_SEG, HEAP_SEG, SONG_SEG, TASK_SEG = 0x7100, 0x7200, 0x7400, 0x7300
 FINE = (ctypes.c_uint16 * 384).in_dll(LM, 'g_al_fine')
 
@@ -26,6 +27,7 @@ class MO(Orig):
         super().__init__()
         w = lambda seg, off, b: self.uc.mem_write((seg + BASE_SEG) * 16 + off, b)
         w(0x161B, 0x0001, b'\xe6\xb4\xcb')                                   # OPL write primitive: log (port, reg, val)
+        w(0x1711, 0x002A, b'\xe6\xb7\xcb')                                   # MPU-401 data byte: log
         w(0, 0x2B4F, bytes([0xb8, 0, 0, 0xba, HEAP_SEG & 255, HEAP_SEG >> 8, 0xcb]))   # malloc -> HEAP_SEG:0
         w(0, 0x2A45, b'\xcb')                                                # free
         w(0x1505, 0x501, b'\xe6\xb5' + bytes([0xb8, 0, 0, 0xba, TASK_SEG & 255, TASK_SEG >> 8, 0xcb]))   # task create: log rate
@@ -44,7 +46,8 @@ class MO(Orig):
         for r in range(32):
             uc.mem_write(d + 0x3022 + r * 0x18, struct.pack('<12H', *FINE[r * 12:r * 12 + 12]))
     def wr(self, p, v):
-        if p == 0xb4: self.log.append((self.arg(1) & 0xFF, self.arg(2) & 0xFF))
+        if p == 0xb4: self.log.append((self.arg(0), self.arg(1) & 0xFF, self.arg(2) & 0xFF))
+        elif p == 0xb7: self.log.append(('mpu', self.arg(0) & 0xFF))
         elif p == 0xb5: self.rates.append(self.arg(2))
         elif p == 0xb6: self.rates.append(self.arg(2))
         else: super().wr(p, v)
@@ -52,6 +55,13 @@ class MO(Orig):
         sp = self.uc.reg_read(UC_X86_REG_SP); ss = self.uc.reg_read(UC_X86_REG_SS)
         return struct.unpack('<H', bytes(self.uc.mem_read(ss * 16 + sp + 4 + 2 * n, 2)))[0]
     def playing(self): return self.rw(0x2EC4)
+    def set_gm(self):                             # MUSIC_Init card 3: the event table points at the MPU-401 driver (15D4:039C)
+        tbl = [0x122, 0x146, 0x16A, 0x18E, 0x1B2, 0x1CD, 0x1E8, 0, 0, 0, 0]
+        self.uc.mem_write(TBL_SEG * 16, b''.join(struct.pack('<HH', o, S1711 if o else 0) for o in tbl))
+    def set_card(self, card):                     # what 161b:0ACF sets for: mono / Sound Blaster Pro (BLASTER T2, A220) / OPL3 (card 1)
+        d = DS * 16
+        st, o3, pa, pb = [(0, 0, 0x388, 0x388), (1, 0, 0x220, 0x222), (1, 1, 0x388, 0x38A)][card]
+        self.uc.mem_write(d + 0x3344, struct.pack('<HHHH', pa, pb, st, o3))
 
 def vlq(v):
     out = [v & 0x7F]; v >>= 7
@@ -92,14 +102,16 @@ def make_song(r):
         tracks.append(bytes(ev))
     return b'MThd' + struct.pack('>IHHH', 6, 1 if ntr > 1 else 0, ntr, div) + b''.join(b'MTrk' + struct.pack('>I', len(t)) + t for t in tracks)
 
+CARD = None                                       # None = a random card per song (3 = General MIDI)
 def run(seed):
-    r = random.Random(seed); song = make_song(r); loop = r.randrange(2); vol0 = r.choice([0xC0, 0xFF, 0x40, r.randrange(256)])
+    r = random.Random(seed); song = make_song(r); card = CARD if CARD is not None else r.randrange(4); loop = r.randrange(2); vol0 = r.choice([0xC0, 0xFF, 0x40, r.randrange(256)])
     nticks = r.choice([150, 400, 900]); ops = {}
     for _ in range(r.randrange(0, 5)):
         ops[r.randrange(nticks)] = r.choice([('vol', r.randrange(-5, 270)), ('pause',), ('resume',), ('stop',), ('vol', r.randrange(256))])
     # ---- original
-    o = MO(); o.uc.mem_write(SONG_SEG * 16, song)
-    o.call(S161B, 0x95B)
+    o = MO(); o.uc.mem_write(SONG_SEG * 16, song); o.set_card(card if card < 3 else 0)
+    if card == 3: o.set_gm()
+    else: o.call(S161B, 0x95B)
     o.call(S144E, 0x6DC, (vol0,)); o.call(S144E, 0x822, (0, SONG_SEG, loop))
     ticks_o = []; pre_o_n = len(o.log)
     for t in range(nticks):
@@ -113,10 +125,12 @@ def run(seed):
         o.call(S144E, 0x15D, (0, TASK_SEG)); ticks_o.append((tuple(o.log[n0:]), o.playing()))
     # ---- port
     log = []; rates = []
-    cbw = WR(lambda reg, val: log.append((reg & 0xFF, val & 0xFF))); cbr = RATE(lambda v: rates.append(v & 0xFFFF))
+    cbw = WR(lambda port, reg, val: log.append((port, reg & 0xFF, val & 0xFF))); cbm = BYTE(lambda b: log.append(('mpu', b & 0xFF)))
+    ctypes.c_void_p.in_dll(LM, 'g_mpu_write').value = ctypes.cast(cbm, ctypes.c_void_p).value; cbr = RATE(lambda v: rates.append(v & 0xFFFF))
     ctypes.c_void_p.in_dll(LM, 'g_al_write').value = ctypes.cast(cbw, ctypes.c_void_p).value
     LM.midi_set_rate_callback(cbr)
-    LM.midi_reset(); LM.al_init(); n_init = len(log)
+    LM.midi_reset(); LM.al_init(); del log[:]; LM.midi_set_driver(card == 3)
+    if card < 3: LM.al_set_card(card)
     ticks_p = []
     LM.midi_set_volume(vol0); LM.midi_play(song, len(song), loop)
     pre_p_n = len(log)

@@ -17,6 +17,7 @@ void config_defaults(void)
 {
     memset(&g_port, 0, sizeof g_port);
     g_port.framerate = FR_DISPLAY;
+    g_port.display = 3;
     g_port.pad[PAD_JUMP] = 0;            /* A */
     g_port.pad[PAD_FIRE] = 2;            /* X */
     g_port.pad[PAD_LOOKUP] = 9;          /* LB */
@@ -65,6 +66,8 @@ void config_load(const char *path)
         while (*v == ' ') v++;
         if (!strcmp(k, "hud")) g_port.hud_off = !strcmp(v, "off");
         else if (!strcmp(k, "aspect")) g_port.wide = !strcmp(v, "16:9");
+        else if (!strcmp(k, "music")) g_port.music = !strcmp(v, "sbpro") ? MUS_SBPRO : !strcmp(v, "gm") ? MUS_GM : MUS_ADLIB;
+        else if (!strcmp(k, "display")) { if (!strcmp(v, "fullscreen")) g_port.display = 0; else { int n = atoi(v); if (n >= 2 && n <= 8) g_port.display = n; } }
         else if (!strcmp(k, "framerate")) { for (int i = 0; i < FR_COUNT; i++) if (!strcmp(v, k_fr[i])) g_port.framerate = i; }
         else for (int a = 0; a < PAD_ACTIONS; a++) {
             char key[32]; snprintf(key, sizeof key, "pad_%s", k_act[a]);
@@ -80,6 +83,8 @@ void config_save(const char *path)
     FILE *f = fopen(path, "w");
     if (!f) return;
     fprintf(f, "# Hocus Pocus port settings (the original options stay in HOCUS.SAV)\n");
+    fprintf(f, "music=%s\n", g_port.music == MUS_SBPRO ? "sbpro" : g_port.music == MUS_GM ? "gm" : "adlib");
+    if (g_port.display) fprintf(f, "display=%dx\n", g_port.display); else fprintf(f, "display=fullscreen\n");
     fprintf(f, "hud=%s\naspect=%s\nframerate=%s\n", g_port.hud_off ? "off" : "classic", g_port.wide ? "16:9" : "4:3", k_fr[g_port.framerate]);
     for (int a = 0; a < PAD_ACTIONS; a++) fprintf(f, "pad_%s=%s\n", k_act[a], config_pad_name(g_port.pad[a]));
     fclose(f);

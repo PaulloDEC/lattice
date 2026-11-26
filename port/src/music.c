@@ -6,20 +6,30 @@
  * AdLib holds note off/on, control change, program change and pitch bend (aftertouch is unused).  Channel volume (controller 7) is scaled by the
  * master volume (DS:2ED2) in the sequencer before it reaches the driver.
  *
+ * Stereo FM (DS:3348 = 1, the Sound Blaster Pro / OPL3 cards): two chips, one per side, both get every register write except the
+ * pitch: the second chip plays each note 5 fine-tune steps (of 32 per semitone) higher - a detuned chorus.  al_set_card() picks the card.
+ *
  * Driver: 9 OPL voices (voice = two operators); voices are handed out from a FIFO free list; when none is free the oldest note of channel 9 is stolen.
  * The driver keeps the original's quirks (e.g. "all notes off" re-initialises the chip and every channel).
  */
 #include "music.h"
 #include "opl.h"
+#include "gm.h"
 #include <string.h>
 #include <stdlib.h>
 
-al_write_fn g_al_write = opl_write;
+static void opl_sink(int port, int reg, int val);
+al_write_fn g_al_write = opl_sink;
 uint16_t g_al_note_pitch[32][12];
-static void W(int reg, int val) { g_al_write(reg & 0xFFFF, val & 0xFF); }
+static int s_card, s_stereo, s_opl3, s_port_a = 0x388, s_port_b = 0x388;      /* DS:3348, 334A, 3344, 3346 */
+static void P(int port, int reg, int val) { g_al_write(port, reg & 0xFFFF, val & 0xFF); }      /* 161b:0001 */
+static void W(int reg, int val)                                                               /* 161b:0037: both chips */
+{
+    if (s_stereo) { P(s_port_a, reg, val); P(s_port_b, reg, val); } else P(0x388, reg, val);
+}
 
 /* ------------------------------------------------------------------ driver (161b) ------------------------------------------------------- */
-typedef struct { int next, prev, key, vel, chan, pitch, timbre, status; } Voice;      /* DS:D3DA + 0x18 * n */
+typedef struct { int next, prev, key, vel, chan, pitch, pitch2, timbre, status; } Voice;   /* pitch2: the second chip's (+0x12) */      /* DS:D3DA + 0x18 * n */
 typedef struct { int head, tail, program, bend, transpose, fine, volume, pan, unk, key_off, vel_off; } Chan;   /* DS:D092 + 0x1C * n */
 static Voice s_v[9]; static Chan s_c[16];
 static int s_free_head, s_free_tail;
@@ -48,14 +58,26 @@ void al_init(void)                                         /* 161b:0838 + 095B *
         g_al_note_pitch[r][n] = r == 0 ? g_al_note_pitch0[n] : g_al_fine[r][n];
     al_reset();
 }
+static void silence(int port)                              /* 161b:08E2 */
+{
+    for (int v = 0; v < 9; v++) {
+        P(port, 0xA0 + v, 0); P(port, 0xB0 + v, 0);
+        P(port, 0xE0 + g_al_offset_slot[g_al_slot_voice[2 * v]], 0); P(port, 0xE0 + g_al_offset_slot[g_al_slot_voice[2 * v + 1]], 0);
+    }
+}
+void al_set_card(int card)                                 /* 161b:0ACF (the ports here instead of BLASTER) + 095B */
+{
+    s_card = card; s_stereo = card != AL_MONO; s_opl3 = card == AL_OPL3;
+    s_port_a = card == AL_SBPRO ? 0x220 : 0x388; s_port_b = card == AL_SBPRO ? 0x222 : card == AL_OPL3 ? 0x38A : 0x388;
+    al_reset();
+}
+int al_card(void) { return s_card; }
 void al_reset(void)                                        /* 161b:095B */
 {
     s_bend_scale = 2;
-    W(1, 0x20); W(8, 0); W(0xBD, 0);
-    for (int v = 0; v < 9; v++) {
-        W(0xA0 + v, 0); W(0xB0 + v, 0);
-        W(0xE0 + g_al_offset_slot[g_al_slot_voice[2 * v]], 0); W(0xE0 + g_al_offset_slot[g_al_slot_voice[2 * v + 1]], 0);
-    }
+    P(0x388, 1, 0x20); P(0x388, 8, 0); P(0x388, 0xBD, 0);  /* sic: 0x388 in every mode */
+    if (s_opl3) P(s_port_b, 5, 1);                         /* OPL3 mode on */
+    if (s_stereo) { silence(s_port_a); silence(s_port_b); } else silence(0x388);
     s_free_head = s_free_tail = -1;                        /* 06D8 */
     for (int v = 0; v < 9; v++) {
         s_v[v].key = 0; s_v[v].vel = 0; s_v[v].chan = -1; s_v[v].timbre = -1; s_v[v].status = 0;
@@ -79,7 +101,8 @@ static void set_voice_timbre(int v)                        /* 161b:006E */
     W(0xA0 + v, 0); W(0xB0 + v, 0);
     W(0x80 + di, 0xFF); W(0x60 + di, p[4]); W(0x80 + di, p[6]); W(0x20 + di, p[0]); W(0xE0 + di, p[8]); W(0x40 + di, p[2]);
     int sc = g_al_slot_voice[2 * v + 1];
-    W(0xC0 + v, p[10]);
+    if (s_opl3) { P(s_port_a, 0xC0 + v, (p[10] & 15) | 0x20); P(s_port_b, 0xC0 + v, (p[10] & 15) | 0x10); }   /* output: right / left */
+    else P(0x388, 0xC0 + v, p[10]);                        /* (a Sound Blaster Pro writes both chips at 0x388) */
     di = g_al_offset_slot[sc];
     s_maxlevel[sc] = 0x3F - (p[3] & 0x3F); s_scale[sc] = p[3] & 0xC0;
     W(0x40 + di, 0x3F); W(0x80 + di, 0xFF); W(0x60 + di, p[5]); W(0x80 + di, p[7]); W(0x20 + di, p[1]); W(0xE0 + di, p[9]);
@@ -101,9 +124,16 @@ static void set_voice_pitch(int v)                         /* 161b:0469 */
     n += s_c[chn].transpose + s_c[chn].key_off - 12;
     if (n > 0x5F) n = 0x5F;
     if (n < 0) n = 0;
-    int p = g_al_octave_pitch[note_hi[n]] | g_al_note_pitch[s_c[chn].fine & 31][note_lo[n]];
+    int fine = s_c[chn].fine & 31;
+    int p = g_al_octave_pitch[note_hi[n]] | g_al_note_pitch[fine][note_lo[n]];
     s_v[v].pitch = p; p |= s_v[v].status;
-    W(0xA0 + v, p); W(0xB0 + v, p >> 8);
+    if (!s_stereo) { P(0x388, 0xA0 + v, p); P(0x388, 0xB0 + v, p >> 8); return; }
+    P(s_port_a, 0xA0 + v, p); P(s_port_a, 0xB0 + v, p >> 8);
+    fine += 5;                                             /* the second chip: 5/32 of a semitone sharp */
+    if (fine > 31) { fine -= 32; if (n < 0x5F) n++; }
+    p = g_al_octave_pitch[note_hi[n]] | g_al_note_pitch[fine][note_lo[n]];
+    s_v[v].pitch2 = p; p |= s_v[v].status;
+    P(s_port_b, 0xA0 + v, p); P(s_port_b, 0xB0 + v, p >> 8);
 }
 static int find_voice(int ch, int key)                     /* 161b:041E */
 {
@@ -116,7 +146,8 @@ void al_note_off(int ch, int key, int vel)                 /* 161b:0B67 */
     int v = find_voice(ch, key);
     if (v < 0) return;
     s_v[v].status = 0;
-    W(0xB0 + v, s_v[v].pitch >> 8);
+    if (s_stereo) { P(s_port_a, 0xB0 + v, s_v[v].pitch >> 8); P(s_port_b, 0xB0 + v, s_v[v].pitch2 >> 8); }
+    else P(0x388, 0xB0 + v, s_v[v].pitch >> 8);
     list_remove(v, &s_c[ch].head, &s_c[ch].tail);
     list_add(v, &s_free_head, &s_free_tail);
 }
@@ -170,7 +201,35 @@ void al_pitch_bend(int ch, int lsb, int msb)               /* 161b:0DE0 */
     for (int v = s_c[ch].head; v >= 0; v = s_v[v].next) set_voice_pitch(v);
 }
 
+/* ------------------------------------------------------------------ MPU-401 General MIDI driver (1711) ---------------------------------- */
+/* The MIDI events as bytes, as they come (the sequencer has already scaled controller 7 by the master volume).  "All notes off" on
+ * channel 0 is preceded by a Roland GS reset (the sequencer sends it to every channel at play / stop). */
+static void mpu_null(int b) { (void)b; }
+mpu_write_fn g_mpu_write = mpu_null;
+static void mpu3(int st, int a, int b) { g_mpu_write(st & 0xFF); g_mpu_write(a & 0xFF); g_mpu_write(b & 0xFF); }        /* 1711:0128 */
+static void mpu_note_off(int ch, int key, int vel) { mpu3(0x80 | ch, key, vel); }                                     /* 1711:0122 */
+static void mpu_note_on(int ch, int key, int vel)  { mpu3(0x90 | ch, key, vel); }                                     /* 1711:0146 */
+static void mpu_aftertouch(int ch, int key, int p) { mpu3(0xA0 | ch, key, p); }                                       /* 1711:016A */
+static void mpu_control(int ch, int ctrl, int val)                                                                    /* 1711:018E */
+{
+    static const uint8_t gs_reset[] = { 0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7 };          /* cs:014E */
+    if (ctrl == 0x7B && ch == 0) for (size_t i = 0; i < sizeof gs_reset; i++) g_mpu_write(gs_reset[i]);
+    mpu3(0xB0 | ch, ctrl, val);
+}
+static void mpu_program(int ch, int prog)  { g_mpu_write((0xC0 | ch) & 0xFF); g_mpu_write(prog & 0xFF); }             /* 1711:01B2 */
+static void mpu_pressure(int ch, int p)    { g_mpu_write((0xD0 | ch) & 0xFF); g_mpu_write(p & 0xFF); }                /* 1711:01CD */
+static void mpu_pitch_bend(int ch, int lsb, int msb) { mpu3(0xE0 | ch, lsb, msb); }                                  /* 1711:01E8 */
+
 /* ------------------------------------------------------------------ sequencer (144e) ---------------------------------------------------- */
+/* The driver table at DS:2ED4 (aftertouch / channel pressure are empty for the AdLib: their bytes are skipped). */
+typedef struct {
+    void (*note_off)(int, int, int), (*note_on)(int, int, int), (*aftertouch)(int, int, int), (*control)(int, int, int);
+    void (*program)(int, int), (*pressure)(int, int), (*pitch_bend)(int, int, int);
+} Driver;
+static const Driver k_adlib = { al_note_off, al_note_on, NULL, al_control, al_program, NULL, al_pitch_bend };
+static const Driver k_mpu = { mpu_note_off, mpu_note_on, mpu_aftertouch, mpu_control, mpu_program, mpu_pressure, mpu_pitch_bend };
+static const Driver *s_drv = &k_adlib;
+void midi_set_driver(int mpu) { s_drv = mpu ? &k_mpu : &k_adlib; }
 typedef struct { int next; uint32_t delta; int active, running; size_t start, cur; } Track;     /* 0x18 bytes at the original */
 static const uint8_t *s_data; static size_t s_size;
 static Track s_tr[64]; static int s_ntracks;
@@ -210,13 +269,13 @@ static void seq_channel_volume(int ch, int vol)              /* 144e:05E5 */
 {
     s_chanvol[ch] = vol;
     vol = (int16_t)(vol * s_master) / 255;                   /* no driver volume entry for the AdLib */
-    al_control(ch, 7, vol);
+    s_drv->control(ch, 7, vol);
 }
-static void all_notes_off_16(void) { for (int c = 0; c < 16; c++) al_control(c, 0x7B, 0); }          /* 144e:05B4 */
+static void all_notes_off_16(void) { for (int c = 0; c < 16; c++) s_drv->control(c, 0x7B, 0); }          /* 144e:05B4 */
 static void reset_controllers_16(void)                       /* 144e:0654 */
 {
     for (int c = 0; c < 16; c++) {
-        al_control(c, 0x79, 0); al_control(c, 0x64, 0); al_control(c, 0x65, 0); al_control(c, 6, 2); al_control(c, 0x26, 0);
+        s_drv->control(c, 0x79, 0); s_drv->control(c, 0x64, 0); s_drv->control(c, 0x65, 0); s_drv->control(c, 6, 2); s_drv->control(c, 0x26, 0);
         seq_channel_volume(c, 0x5A);
     }
 }
@@ -236,17 +295,17 @@ static void event(Track *t)                                  /* 144e:017F..04FB 
         if (st & 0x80) t->running = st; else { st = t->running; t->cur--; }
         int ch = st & 15, cmd = st >> 4, a, b;
         switch (cmd) {
-        case 8: a = byte_at(t->cur++); b = byte_at(t->cur++); al_note_off(ch, a, b); break;
-        case 9: a = byte_at(t->cur++); b = byte_at(t->cur++); al_note_on(ch, a, b); break;
-        case 0xA: t->cur += 2; break;
+        case 8: a = byte_at(t->cur++); b = byte_at(t->cur++); s_drv->note_off(ch, a, b); break;
+        case 9: a = byte_at(t->cur++); b = byte_at(t->cur++); s_drv->note_on(ch, a, b); break;
+        case 0xA: a = byte_at(t->cur++); b = byte_at(t->cur++); if (s_drv->aftertouch) s_drv->aftertouch(ch, a, b); break;
         case 0xB:
             a = byte_at(t->cur++); b = byte_at(t->cur++);
             if (a == 0x7E) t->cur++;
-            if (a == 7) seq_channel_volume(ch, b); else al_control(ch, a, b);
+            if (a == 7) seq_channel_volume(ch, b); else s_drv->control(ch, a, b);
             break;
-        case 0xC: a = byte_at(t->cur++); al_program(ch, a); break;
-        case 0xD: t->cur++; break;
-        case 0xE: a = byte_at(t->cur++); b = byte_at(t->cur++); al_pitch_bend(ch, a, b); break;
+        case 0xC: a = byte_at(t->cur++); s_drv->program(ch, a); break;
+        case 0xD: a = byte_at(t->cur++); if (s_drv->pressure) s_drv->pressure(ch, a); break;
+        case 0xE: a = byte_at(t->cur++); b = byte_at(t->cur++); s_drv->pitch_bend(ch, a, b); break;
         default: break;
         }
     }
@@ -320,13 +379,23 @@ void midi_set_rate_callback(void (*fn)(int rate)) { s_rate_cb = fn; }
 int midi_tick_rate(void) { return s_rate; }
 
 /* ------------------------------------------------------------------ player: sequencer clock + OPL -> audio samples ------------------------- */
-static int s_out_rate = 44100, s_tick_rate; static int64_t s_tick_acc; static double s_opl_frac; static int s_s0, s_s1;
+static int s_out_rate = 44100, s_tick_rate; static int64_t s_tick_acc; static double s_opl_frac; static int s_s0[2], s_s1[2];
+static void opl_sink(int port, int reg, int val)           /* the card's ports -> the emulated chips (0 = left, 1 = right) */
+{
+    if (s_card == AL_SBPRO) { if (port == 0x388 || port == 0x220) opl_write_chip(0, reg, val); if (port == 0x388 || port == 0x222) opl_write_chip(1, reg, val); }
+    else if (s_card == AL_OPL3) {                                       /* bank 1 = left; 1 / 8 / BD are global on an OPL3 */
+        if (reg == 5 && port == 0x38A) return;
+        if (reg == 1 || reg == 8 || reg == 0xBD) { opl_write_chip(0, reg, val); opl_write_chip(1, reg, val); return; }
+        opl_write_chip(port == 0x38A ? 0 : 1, reg, val);
+    }
+    else opl_write_chip(0, reg, val);
+}
 static uint8_t *s_song_copy;
 static void player_rate(int r) { s_tick_rate = r; }
 void music_init(int out_rate)
 {
-    s_out_rate = out_rate > 0 ? out_rate : 44100; s_tick_rate = 0; s_tick_acc = 0; s_opl_frac = 0; s_s0 = s_s1 = 0;
-    g_al_write = opl_write; opl_reset(); midi_reset(); al_init(); midi_set_rate_callback(player_rate); midi_set_volume(0xC0);
+    s_out_rate = out_rate > 0 ? out_rate : 44100; s_tick_rate = 0; s_tick_acc = 0; s_opl_frac = 0; memset(s_s0, 0, sizeof s_s0); memset(s_s1, 0, sizeof s_s1);
+    g_al_write = opl_sink; opl_reset(); midi_reset(); al_init(); midi_set_rate_callback(player_rate); midi_set_volume(0xC0);
 }
 void music_stop(void)
 {
@@ -342,17 +411,57 @@ void music_start(const uint8_t *song, size_t size, int loop)
     s_tick_acc = 0;
 }
 void music_set_volume(int vol) { midi_set_volume(vol); }
-int music_active(void) { return midi_playing(); }
-void music_render(int16_t *out, int frames)
+static int s_gm;                                            /* General MIDI: the MPU-401 driver into the SoundFont synthesizer */
+void music_set_card(int card)
 {
+    if (card == MUSIC_GM && !gm_ready()) card = AL_MONO;
+    if ((card == MUSIC_GM) == s_gm && (s_gm || card == s_card)) return;
+    music_stop();
+    s_gm = card == MUSIC_GM; midi_set_driver(s_gm);
+    if (s_gm) { g_mpu_write = gm_byte; gm_reset(); }
+    else { opl_reset(); al_set_card(card); }
+    memset(s_s0, 0, sizeof s_s0); memset(s_s1, 0, sizeof s_s1);
+}
+int music_card(void) { return s_gm ? MUSIC_GM : s_card; }
+static void render_gm(int16_t *out, int frames)             /* in blocks between MIDI ticks; ticks on the same frames as the FM path */
+{
+    static int owed;                                         /* the tick's own frame: counted, not yet rendered */
+    while (frames > 0) {
+        int n = frames;
+        if (owed) { n = 1; owed = 0; }
+        else if (midi_playing() && s_tick_rate > 0) {
+            int64_t left = (s_out_rate - s_tick_acc + s_tick_rate - 1) / s_tick_rate;   /* the frame of the next tick, 1-based */
+            if (left < 1) left = 1;
+            if (left - 1 >= frames) s_tick_acc += (int64_t)s_tick_rate * frames;
+            else {
+                n = (int)left - 1;
+                if (n) gm_render(out, n);
+                out += 2 * n; frames -= n;
+                s_tick_acc += (int64_t)s_tick_rate * left;
+                while (s_tick_acc >= s_out_rate) { s_tick_acc -= s_out_rate; midi_service(); }
+                owed = 1; continue;
+            }
+        }
+        gm_render(out, n);
+        out += 2 * n; frames -= n;
+    }
+}
+int music_active(void) { return midi_playing(); }
+void music_render(int16_t *out, int frames)                /* stereo: out = interleaved L R */
+{
+    if (s_gm) { render_gm(out, frames); return; }
+    int nchip = s_stereo ? 2 : 1;
     for (int i = 0; i < frames; i++) {
         if (midi_playing() && s_tick_rate > 0) {
             s_tick_acc += s_tick_rate;
             while (s_tick_acc >= s_out_rate) { s_tick_acc -= s_out_rate; midi_service(); }
         }
         s_opl_frac += (double)OPL_RATE / s_out_rate;
-        while (s_opl_frac >= 1.0) { s_opl_frac -= 1.0; s_s0 = s_s1; s_s1 = opl_sample(); }
-        int s = (int)(s_s0 + (s_s1 - s_s0) * (1.0 - s_opl_frac)) * 3 + out[i];
-        out[i] = (int16_t)(s > 32767 ? 32767 : s < -32768 ? -32768 : s);
+        while (s_opl_frac >= 1.0) { s_opl_frac -= 1.0; for (int k = 0; k < nchip; k++) { s_s0[k] = s_s1[k]; s_s1[k] = opl_sample_chip(k); } }
+        for (int side = 0; side < 2; side++) {
+            int k = nchip == 2 ? side : 0;
+            int s = (int)(s_s0[k] + (s_s1[k] - s_s0[k]) * (1.0 - s_opl_frac)) * 3 + out[2 * i + side];
+            out[2 * i + side] = (int16_t)(s > 32767 ? 32767 : s < -32768 ? -32768 : s);
+        }
     }
 }

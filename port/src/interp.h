@@ -20,7 +20,7 @@ void interp_set_enabled(int on);    /* also switches the steady tick schedule (t
 int  interp_enabled(void);
 int  interp_ready(void);            /* inside a level's tick wait with a recorded frame to show */
 
-/* The picture for the current time, RGBA, *w x 200 (320, or 426 in the wide view).  Returns 0 when the VGA page
+/* The picture for the current time, RGBA, *w x 200 (320, or 428 in the wide view).  Returns 0 when the VGA page
  * must be shown instead: Original setup, outside a level's tick wait, or a frame that can't be redrawn. */
 int  interp_render(uint32_t *rgba, int *w);
 int  interp_render_at(uint32_t *rgba, int *w, double alpha);    /* alpha 0 = start of the blend, 1 = its end */
@@ -30,7 +30,7 @@ int  interp_render_latest(uint8_t out[320 * 200]);              /* the latest re
  * Returns 0 when the VGA page should be shown as is (classic view, or a 320-wide full-screen display). */
 int  interp_compose_vga(uint32_t *rgba, int *w, int keep_sides);
 
-/* Enhanced views: wide = 16:9 (426 x 200), hud_off = the play area fills all 200 rows.  Either one also
+/* Enhanced views: wide = 16:9 (428 x 200), hud_off = the play area fills all 200 rows.  Either one also
  * widens the game's own screen bounds for shots, projectiles and effects (g_view_ext, camera.h). */
 void interp_set_view(int wide, int hud_off);
 int  interp_wide(void);

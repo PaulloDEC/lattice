@@ -6,6 +6,7 @@
 #define HOCUS_CONFIG_H
 
 enum { FR_ORIGINAL, FR_30, FR_60, FR_120, FR_DISPLAY, FR_COUNT };
+enum { MUS_ADLIB, MUS_SBPRO, MUS_GM, MUS_COUNT };   /* mono FM, stereo FM (the original's Sound Blaster Pro path), General MIDI */
 enum { PAD_JUMP, PAD_FIRE, PAD_LOOKUP, PAD_LOOKDOWN, PAD_PAUSE, PAD_ACTIONS };
 #define PAD_LT 40                         /* the triggers, as button codes after SDL's buttons */
 #define PAD_RT 41
@@ -14,6 +15,8 @@ typedef struct PortSettings {
     int hud_off;                          /* HUD style: 0 Classic, 1 Off */
     int wide;                             /* aspect ratio: 0 4:3, 1 16:9 */
     int framerate;                        /* FR_* */
+    int music;                            /* music device while music is on: MUS_* */
+    int display;                          /* display size: 0 = fullscreen, 2..8 = window of that many times 320 x 240 */
     int pad[PAD_ACTIONS];                 /* controller button per action (SDL_GameControllerButton or PAD_LT / PAD_RT) */
 } PortSettings;
 

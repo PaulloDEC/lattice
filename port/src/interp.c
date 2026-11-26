@@ -10,6 +10,8 @@
 #include "loop.h"
 #include "frame.h"
 #include "state.h"
+#include "wide_art.h"
+#include "dat.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -96,7 +98,7 @@ static int live_cell(int cx, int cy)              /* layer1, else layer2, else -
     return -1;
 }
 
-#define WIDE_W 426                                /* 16:9 at the original's 1.2:1 pixels: 200 * 1.2 * 16 / 9 */
+#define WIDE_W 428                                /* 16:9 at the original's 1.2:1 pixels (200 * 1.2 * 16 / 9 = 426.7), rounded to whole 4-px columns: 54 px a side */
 #define MAP_PX_W (MAP_WIDTH * 16)
 #define MAP_PX_H (60 * 16)
 static int view_w(void) { return s_wide ? WIDE_W : 320; }
@@ -125,9 +127,54 @@ static void set_view_ext(void)
     g_view_ext = e;
 }
 
+/* ---- 16:9 artwork (wide_art.h): the title screen and the HUD frame.  The picture is the artwork; whatever the
+ * game draws over the original picture (HUD numbers and icons, the "registered version" strip) is found by
+ * comparing the page with the original picture and goes on top. */
+static uint8_t s_title_ref[200 * 320]; static int s_title_ok;     /* DAT entry 2, decoded */
+static uint8_t s_hud_ref[40 * 320]; static int s_hud_ok;          /* the status panel as the level setup drew it */
+static uint8_t s_title_art[200][320], s_title_set[200][320];      /* centre pixels the artwork changes */
+static uint8_t s_hud_art[40][320], s_hud_set[40][320];
+static void art_init(void)
+{
+    static int done; if (done) return; done = 1;
+    for (int i = 0; i < g_wide_title_ndelta; i++) { const WideDelta *d = &g_wide_title_delta[i]; if (d->x < 320 && d->y < 200) { s_title_art[d->y][d->x] = d->c; s_title_set[d->y][d->x] = 1; } }
+    for (int i = 0; i < g_wide_hud_ndelta; i++) { const WideDelta *d = &g_wide_hud_delta[i]; if (d->x < 320 && d->y < 40) { s_hud_art[d->y][d->x] = d->c; s_hud_set[d->y][d->x] = 1; } }
+    uint32_t n; uint8_t *p = dat_load(2, &n);                      /* PCX: 128-byte header, RLE, 200 lines */
+    if (p && n > 128 + 769) {
+        int bpl = p[66] | (p[67] << 8), x = 0, y = 0;
+        uint32_t i = 128;
+        while (y < 200 && i < n - 769) {
+            int c = p[i++], k = 1;
+            if ((c & 0xC0) == 0xC0) { k = c & 0x3F; c = p[i++]; }
+            while (k-- > 0 && y < 200) { if (x < 320) s_title_ref[y * 320 + x] = (uint8_t)c; if (++x >= bpl) { x = 0; y++; } }
+        }
+        s_title_ok = y >= 200;
+    }
+    free(p);
+}
+/* the HUD rows (y0..y0+rows) of a W-wide picture from a 320-wide page image img (rows 160..199) */
+static int hud_art(uint8_t *out, int W, int y0, const uint8_t *img)
+{
+    if (W != WIDE_W || !s_hud_ok) return 0;
+    int ox = (W - 320) / 2;
+    for (int r = 0; r < 40; r++) {
+        uint8_t *o = out + (y0 + r) * W;
+        const uint8_t *v = img + (160 + r) * 320, *ref = s_hud_ref + r * 320;
+        memcpy(o, g_wide_hud_side[0][r], WIDE_ART_SIDE);
+        memcpy(o + ox + 320, g_wide_hud_side[1][r], WIDE_ART_SIDE);
+        for (int x = 0; x < 320; x++) o[ox + x] = (v[x] == ref[x] && s_hud_set[r][x]) ? s_hud_art[r][x] : v[x];
+    }
+    return 1;
+}
+static int s_hud_art_drawn;                        /* the last render_pair drew the HUD artwork (no black sides) */
+
 static void level_start(void)
 {
     s_level_active = 1;
+    {                                              /* the panel as set up: page 0 rows 160..199 */
+        static uint8_t pg[320 * 200];
+        vga_render_indexed_at(0, pg); memcpy(s_hud_ref, pg + 160 * 320, sizeof s_hud_ref); s_hud_ok = 1;
+    }
     prev->valid = cur->valid = bld->valid = ahead[0]->valid = ahead[1]->valid = 0;
     s_rec = bld; s_armed = 0; s_ready = 0; s_nahead = 0; s_pred_have = 0;
 }
@@ -214,6 +261,7 @@ static void level_end(void) { s_level_active = 0; s_ready = 0; }
 
 void interp_install(void)
 {
+    art_init();
     g_rec_blit = rec_blit; g_rec_pixel = rec_pixel; g_rec_rect = rec_rect;
     g_loop_hooks.level_start = level_start; g_loop_hooks.tick_begin = tick_begin; g_loop_hooks.tick_nosmooth = tick_nosmooth;
     g_loop_hooks.tick_shown = tick_shown; g_loop_hooks.tick_waited = tick_waited; g_loop_hooks.level_end = level_end;
@@ -316,7 +364,8 @@ static void render_pair(uint8_t *out, int W, int PH, const Frame *A, const Frame
     const uint8_t *img = B->img;
     int ox = (W - 320) / 2;
     memset(out, 0, (size_t)W * 200);
-    for (int y = PH; y < 200; y++) memcpy(out + y * W + ox, img + (y - PH + 160) * 320, 320);
+    s_hud_art_drawn = PH < 200 && hud_art(out, W, PH, img);
+    if (!s_hud_art_drawn) for (int y = PH; y < 200; y++) memcpy(out + y * W + ox, img + (y - PH + 160) * 320, 320);
 
     const Frame *p = A;
     int use_prev = p->valid && !p->nosmooth
@@ -443,7 +492,7 @@ int interp_render_at(uint32_t *rgba, int *w, double a)
     int W = view_w(), PH = play_h();
     render_pair(s_idx, W, PH, A, B, a);
     memcpy(s_last, s_idx, (size_t)W * 200); s_last_w = W; s_last_ph = PH;
-    to_rgba(s_idx, W, PH, PH, rgba);
+    to_rgba(s_idx, W, PH, s_hud_art_drawn ? 200 : PH, rgba);
     *w = W;
     return 1;
 }
@@ -498,12 +547,30 @@ int interp_compose_vga(uint32_t *rgba, int *w, int keep_sides)
                         int Y = y < 160 ? y + oy : y;      /* play area: centred like the view; status panel rows stay */
                         s_idx[Y * W + x + ox] = vga[y * 320 + x];
                     }
-            to_rgba(s_idx, W, PH, PH, rgba);
+            to_rgba(s_idx, W, PH, s_hud_art_drawn ? 200 : PH, rgba);
             *w = W;
             return 1;
         }
     }
     if (W == 320) return 0;
+    if (W == WIDE_W && s_title_ok) {               /* the title screen: the 16:9 artwork, the game's overlays on top */
+        int same = 0;
+        for (int i = 0; i < 320 * 200; i++) same += vga[i] == s_title_ref[i];
+        if (same >= 320 * 200 * 85 / 100) {
+            for (int y = 0; y < 200; y++) {
+                uint8_t *o = s_idx + y * W;
+                memcpy(o, g_wide_title_side[0][y], WIDE_ART_SIDE);
+                memcpy(o + ox + 320, g_wide_title_side[1][y], WIDE_ART_SIDE);
+                for (int x = 0; x < 320; x++) {
+                    uint8_t v = vga[y * 320 + x];
+                    o[ox + x] = (v == s_title_ref[y * 320 + x] && s_title_set[y][x]) ? s_title_art[y][x] : v;
+                }
+            }
+            to_rgba(s_idx, W, 200, 200, rgba);
+            *w = W;
+            return 2;
+        }
+    }
     memset(s_idx, 0, (size_t)W * 200);
     for (int y = 0; y < 200; y++) memcpy(s_idx + y * W + ox, vga + y * 320, 320);
     to_rgba(s_idx, W, 200, 0, rgba);

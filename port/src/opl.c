@@ -1,6 +1,6 @@
 /*
  * opl.c - compact OPL2 (YM3812) emulator: 9 two-operator FM voices, 4 waveforms, ADSR envelope with key scaling, tremolo/vibrato,
- * feedback.  Melodic mode only (the game never enables rhythm mode: it writes 0xBD = 0 and plays drums on ordinary voices).
+ * feedback.  Two independent chips (the stereo FM cards: Sound Blaster Pro = two OPL2s, one per side).  Melodic mode only (the game never enables rhythm mode: it writes 0xBD = 0 and plays drums on ordinary voices).
  * Written from the chip's documented behaviour (log-sine/exp tables, 1/256-octave attenuation units), not bit-exact to the real chip.
  */
 #define _USE_MATH_DEFINES
@@ -18,8 +18,8 @@ typedef struct {
 } Op;
 typedef struct { int fnum, block, kon, fb, cnt; Op op[2]; } Ch;
 
-static Ch s_ch[9]; static int s_bd, s_wse, s_nts;
-static uint32_t s_timer; static uint32_t s_am_pos;
+typedef struct { Ch ch[9]; int bd, wse, nts; uint32_t timer, am_pos; } Chip;
+static Chip s_chip[OPL_CHIPS], *C = &s_chip[0];          /* C = the chip being written or rendered */
 static int16_t s_logsin[256]; static uint16_t s_exp[256]; static int s_ready;
 static const int s_mult[16] = {1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 20, 24, 24, 30, 30};   /* x2 */
 static const int s_ksl_rom[16] = {0, 32, 40, 45, 48, 51, 53, 55, 56, 58, 59, 60, 61, 62, 63, 64};
@@ -40,8 +40,9 @@ static void init_tables(void)
 void opl_reset(void)
 {
     if (!s_ready) init_tables();
-    memset(s_ch, 0, sizeof s_ch); s_bd = s_wse = s_nts = 0; s_timer = 0; s_am_pos = 0;
-    for (int c = 0; c < 9; c++) for (int o = 0; o < 2; o++) { s_ch[c].op[o].env = 511; s_ch[c].op[o].state = OFF; }
+    memset(s_chip, 0, sizeof s_chip);
+    for (int k = 0; k < OPL_CHIPS; k++)
+        for (int c = 0; c < 9; c++) for (int o = 0; o < 2; o++) { s_chip[k].ch[c].op[o].env = 511; s_chip[k].ch[c].op[o].state = OFF; }
 }
 static void key(Ch *c, int on)
 {
@@ -52,21 +53,24 @@ static void key(Ch *c, int on)
         if (on) { p->state = ATTACK; p->phase = 0; } else if (p->state != OFF) p->state = RELEASE;
     }
 }
-void opl_write(int reg, int val)
+void opl_write(int reg, int val) { opl_write_chip(0, reg, val); }
+int  opl_sample(void) { return opl_sample_chip(0); }
+void opl_write_chip(int chip, int reg, int val)
 {
+    C = &s_chip[chip & (OPL_CHIPS - 1)];
     reg &= 0xFF; val &= 0xFF;
-    if (reg == 1) { s_wse = (val >> 5) & 1; return; }
-    if (reg == 8) { s_nts = (val >> 6) & 1; return; }
-    if (reg == 0xBD) { s_bd = val; return; }
-    if (reg >= 0xA0 && reg <= 0xA8) { Ch *c = &s_ch[reg - 0xA0]; c->fnum = (c->fnum & 0x300) | val; return; }
+    if (reg == 1) { C->wse = (val >> 5) & 1; return; }
+    if (reg == 8) { C->nts = (val >> 6) & 1; return; }
+    if (reg == 0xBD) { C->bd = val; return; }
+    if (reg >= 0xA0 && reg <= 0xA8) { Ch *c = &C->ch[reg - 0xA0]; c->fnum = (c->fnum & 0x300) | val; return; }
     if (reg >= 0xB0 && reg <= 0xB8) {
-        Ch *c = &s_ch[reg - 0xB0]; c->fnum = (c->fnum & 0xFF) | ((val & 3) << 8); c->block = (val >> 2) & 7; key(c, (val >> 5) & 1); return;
+        Ch *c = &C->ch[reg - 0xB0]; c->fnum = (c->fnum & 0xFF) | ((val & 3) << 8); c->block = (val >> 2) & 7; key(c, (val >> 5) & 1); return;
     }
-    if (reg >= 0xC0 && reg <= 0xC8) { Ch *c = &s_ch[reg - 0xC0]; c->fb = (val >> 1) & 7; c->cnt = val & 1; return; }
+    if (reg >= 0xC0 && reg <= 0xC8) { Ch *c = &C->ch[reg - 0xC0]; c->fb = (val >> 1) & 7; c->cnt = val & 1; return; }
     if (reg < 0x20 || reg > 0xF5) return;
     int off = reg & 0x1F, grp = reg & 0xE0;
     if (off >= 32 || s_slot_ch[off] < 0) return;
-    Op *p = &s_ch[s_slot_ch[off]].op[s_slot_op[off]];
+    Op *p = &C->ch[s_slot_ch[off]].op[s_slot_op[off]];
     switch (grp) {
     case 0x20: p->am = val >> 7; p->vib = (val >> 6) & 1; p->egt = (val >> 5) & 1; p->ksr = (val >> 4) & 1; p->mult = val & 15; break;
     case 0x40: p->ksl = val >> 6; p->tl = val & 63; break;
@@ -78,7 +82,7 @@ void opl_write(int reg, int val)
 static int op_rate(const Ch *c, const Op *p, int r)
 {
     if (!r) return 0;
-    int ksr = ((c->block << 1) | ((c->fnum >> (s_nts ? 8 : 9)) & 1)) >> (p->ksr ? 0 : 2);
+    int ksr = ((c->block << 1) | ((c->fnum >> (C->nts ? 8 : 9)) & 1)) >> (p->ksr ? 0 : 2);
     int rate = r * 4 + ksr; return rate > 63 ? 63 : rate;
 }
 static void env_step(const Ch *c, Op *p)
@@ -95,7 +99,7 @@ static void env_step(const Ch *c, Op *p)
     if (!r) return;
     if (p->state == ATTACK && hi >= 15) { p->env = 0; p->state = DECAY; return; }
     if (hi >= 12) inc = (1 << (hi - 12)) * (lo + 4) / 4; /* fast rates: several steps per sample */
-    else { int sh = 12 - hi; if ((s_timer & ((1u << sh) - 1)) == 0) inc = s_inc[lo][(s_timer >> sh) & 7]; }
+    else { int sh = 12 - hi; if ((C->timer & ((1u << sh) - 1)) == 0) inc = s_inc[lo][(C->timer >> sh) & 7]; }
     if (!inc) return;
     if (p->state == ATTACK) {
         p->env += ((~p->env) * inc) >> 3; if (p->env <= 0) { p->env = 0; p->state = DECAY; }
@@ -111,7 +115,7 @@ static int op_out(const Ch *c, Op *p, int mod, int am_level, int vib_off)
     uint32_t inc = (((uint32_t)fn << c->block) * s_mult[p->mult]) >> 1;   /* 20-bit phase accumulator: 10 index bits at the top */
     p->phase = (p->phase + inc) & 0xFFFFF;
     int idx = (int)((p->phase >> 10) + mod) & 0x3FF, neg = 0, att;
-    int w = s_wse ? p->ws : 0, half = idx & 0x200; neg = half != 0;
+    int w = C->wse ? p->ws : 0, half = idx & 0x200; neg = half != 0;
     int q = idx & 0x1FF; if (q & 0x100) q = 0x1FF - q; /* quarter-wave index 0..255 */
     switch (w) {
     case 1: if (neg) return 0; break;
@@ -126,21 +130,22 @@ static int op_out(const Ch *c, Op *p, int mod, int am_level, int vib_off)
     int v = s_exp[att & 255] >> sh;
     return neg ? -v : v;
 }
-int opl_sample(void)
+int opl_sample_chip(int chip)
 {
-    s_timer++; s_am_pos++;
-    int am_p = (s_am_pos >> 8) % 210, am = am_p < 105 ? am_p : 210 - am_p;      /* triangle 0..105 -> tremolo ~3.7 Hz */
-    am = (am >> 2) >> ((s_bd & 0x80) ? 0 : 2);                                  /* depth: 4.8 dB or 1 dB, in envelope units */
-    int vp = (s_timer >> 10) & 7, sum = 0;
+    C = &s_chip[chip & (OPL_CHIPS - 1)];
+    C->timer++; C->am_pos++;
+    int am_p = (C->am_pos >> 8) % 210, am = am_p < 105 ? am_p : 210 - am_p;      /* triangle 0..105 -> tremolo ~3.7 Hz */
+    am = (am >> 2) >> ((C->bd & 0x80) ? 0 : 2);                                  /* depth: 4.8 dB or 1 dB, in envelope units */
+    int vp = (C->timer >> 10) & 7, sum = 0;
     for (int i = 0; i < 9; i++) {
-        Ch *c = &s_ch[i]; Op *m = &c->op[0], *ca = &c->op[1];
+        Ch *c = &C->ch[i]; Op *m = &c->op[0], *ca = &c->op[1];
         if (m->state == OFF && ca->state == OFF) continue;
         env_step(c, m); env_step(c, ca);
         int voff[2];
         for (int o = 0; o < 2; o++) {
             int range = (c->fnum >> 7) & 7;
             if (!(vp & 3)) range = 0; else if (vp & 1) range >>= 1;
-            range >>= (s_bd & 0x40) ? 0 : 1; if (vp & 4) range = -range;
+            range >>= (C->bd & 0x40) ? 0 : 1; if (vp & 4) range = -range;
             voff[o] = c->op[o].vib ? range : 0;
         }
         int fbmod = c->fb ? (m->prev + m->out) >> (9 - c->fb) : 0;

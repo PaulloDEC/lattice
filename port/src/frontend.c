@@ -72,7 +72,7 @@ static void sparkles_step(void)
 }
 
 /* ---------------------------------------------------------------- menu data (DS:1A04..1AD4, strings from the EXE) */
-#define MAXITEMS 10
+#define MAXITEMS 12
 static const char *k_main[]  = { "Begin a new game", "Restore an old game", "Ordering Information~", "Instructions", "Legends and hints~",
                                  "Change game options", "High scores", "Exit the game" };
 static const char *k_ep[]    = { "Which game do you want to play?", "Time Tripping", "Shattered Worlds", "Warped and Weary", "Destination Home" };
@@ -83,6 +83,7 @@ static const char *k_game[]  = { "How to play Hocus Pocus", "Abandon level & res
                                  "Back to the action!", "Quit to Main Menu" };
 static const char *k_speed[] = { "Select Game Speed", "Slow", "Medium", "Fast" };
 /* the port's option lists, styled like the speed list */
+static const char *k_music[]  = { "Select Music", "Off", "AdLib (mono FM)", "Sound Blaster Pro (stereo FM)", "General MIDI", "General MIDI (no SoundFont)" };
 static const char *k_hud[]    = { "Select HUD Style", "Classic", "Off" };
 static const char *k_aspect[] = { "Select Aspect Ratio", "Classic (4:3)", "Widescreen (16:9)" };
 static const char *k_frate[]  = { "Select Framerate", "Original", "30 fps", "60 fps", "120 fps", "Display rate" };
@@ -92,7 +93,7 @@ static const char k_hint[] = "Use UP/DOWN/LETTER to move - ENTER to select";
 static struct {                       /* 0B21 state: DS:7C0C table, 7C0A count, 7C08 first-selectable flag, 7C06 title flag */
     const char *item[MAXITEMS]; int count, first, title;
 } m;
-static char s_opt[10][32];            /* the dynamic option strings (DS buffers; the port's options added) */
+static char s_opt[12][32];            /* the dynamic option strings (DS buffers; the port's options added) */
 static int  s_sel[MENU_COUNT];        /* remembered selection per menu (DS:1A04, 1A3C, 1A26, 1A56, 1A80, 1A92, 1AD0; 8.. the port's) */
 static int  s_cur_id, s_cur;          /* DS:82CA menu id, DS:82CE current selection */
 static int  s_row[MAXITEMS], s_nsel;  /* DS:82D0 row table, DS:82CC selectable count */
@@ -109,14 +110,29 @@ static void menu_setup(int id)        /* 06B8:0B21 */
     case MENU_MAIN:    set_items(k_main, 8, 0, 0); break;
     case MENU_OPTIONS:                /* the original's six, with the port's video options; joystick -> controller remap */
         snprintf(s_opt[0], sizeof s_opt[0], "Sound is now %s", g_sound_on ? "on" : "off");
-        snprintf(s_opt[1], sizeof s_opt[1], "Music is now %s", g_music_on ? "on" : "off");
+        snprintf(s_opt[1], sizeof s_opt[1], "Music: %s", !g_music_on ? "Off" : g_port.music == MUS_SBPRO ? "Sound Blaster Pro" : g_port.music == MUS_GM ? "General MIDI" : "AdLib");
         strcpy(s_opt[2], "Volume control~");
-        snprintf(s_opt[3], sizeof s_opt[3], "HUD style: %s", g_port.hud_off ? "Off" : "Classic");
-        snprintf(s_opt[4], sizeof s_opt[4], "Aspect ratio: %s", g_port.wide ? "16:9" : "4:3");
-        snprintf(s_opt[5], sizeof s_opt[5], "Framerate: %s~", config_framerate_name(g_port.framerate));
-        strcpy(s_opt[6], "Game playing speed"); strcpy(s_opt[7], "Keyboard remap"); strcpy(s_opt[8], "Controller remap");
-        { static const char *it[9]; for (int i = 0; i < 9; i++) it[i] = s_opt[i]; set_items(it, 9, 1, 0); } break;
+        if (g_port.display) snprintf(s_opt[3], sizeof s_opt[3], "Display size: %dx window", g_port.display);
+        else strcpy(s_opt[3], "Display size: Fullscreen");
+        snprintf(s_opt[4], sizeof s_opt[4], "HUD style: %s", g_port.hud_off ? "Off" : "Classic");
+        snprintf(s_opt[5], sizeof s_opt[5], "Aspect ratio: %s", g_port.wide ? "16:9" : "4:3");
+        snprintf(s_opt[6], sizeof s_opt[6], "Framerate: %s~", config_framerate_name(g_port.framerate));
+        strcpy(s_opt[7], "Game playing speed"); strcpy(s_opt[8], "Keyboard remap"); strcpy(s_opt[9], "Controller remap");
+        { static const char *it[10]; for (int i = 0; i < 10; i++) it[i] = s_opt[i]; set_items(it, 10, 1, 0); } break;
+    case MENU_DISPLAY: {              /* window multiples that fit the display, then fullscreen */
+        static char l[8][20]; static const char *it[10];
+        int mx = g_front.display_max ? g_front.display_max() : 4, n = 0;
+        it[n++] = "Select Display Size";
+        for (int k = 2; k <= mx; k++) { snprintf(l[k - 2], sizeof l[k - 2], "%dx window", k); it[n++] = l[k - 2]; }
+        it[n++] = "Fullscreen";
+        set_items(it, n, 1, 1); break;
+    }
     case MENU_HUD:       set_items(k_hud, 3, 1, 1); break;
+    case MENU_MUSICDEV: {
+        static const char *it[5]; for (int i = 0; i < 4; i++) it[i] = k_music[i];
+        it[4] = g_front.gm_available && g_front.gm_available() ? k_music[4] : k_music[5];
+        set_items(it, 5, 1, 1); break;
+    }
     case MENU_ASPECT:    set_items(k_aspect, 3, 1, 1); break;
     case MENU_FRAMERATE: set_items(k_frate, 6, 1, 1); break;
     case MENU_PAD: {                  /* controller remap: one line per action with its button */
@@ -648,18 +664,25 @@ void frontend_overlay_volume(void) { overlay(ov_volume, 0); }
 void frontend_overlay_help(void) { frontend_how_to_play(1); }
 
 /* ---------------------------------------------------------------- options (0548:0745) */
-static void toggle_music(void)
-{
-    g_music_on = !g_music_on;
-    if (!g_music_on) { if (g_front.music_off) g_front.music_off(); }
-    else if (g_front.music) g_front.music(MENU_MUSIC, 1);
-}
+static void choose_music(void);           /* port: Off / AdLib / Sound Blaster Pro (was the on / off toggle) */
 /* port: a choice list (like the speed list), opened on the current value; returns the choice or -1 */
 static int choose(int id, int current)
 {
     s_sel[id] = current;
     int r = menu_show(id, 0);
     return r == 0xFF ? -1 : r;
+}
+static void choose_music(void)
+{
+    int c = choose(MENU_MUSICDEV, g_music_on ? 1 + g_port.music : 0);
+    if (c < 0) return;
+    if (c > 0 && !g_front.sound_hw) return;          /* no audio device: music stays off */
+    if (c == 1 + MUS_GM && !(g_front.gm_available && g_front.gm_available())) return;     /* no SoundFont */
+    if (g_front.music_off) g_front.music_off();
+    g_music_on = c > 0;
+    if (c > 0) g_port.music = c - 1;
+    if (g_front.port_apply) g_front.port_apply();    /* sets the FM card (and saves HOCUS.CFG) */
+    if (g_music_on && g_front.music) g_front.music(MENU_MUSIC, 1);
 }
 static void port_apply(void) { if (g_front.port_apply) g_front.port_apply(); }
 
@@ -717,14 +740,20 @@ static void options_loop(void)
         int r = menu_show(MENU_OPTIONS, 0), c;
         switch (r) {
         case 0: g_sound_on = !g_sound_on; break;
-        case 1: toggle_music(); break;
+        case 1: choose_music(); break;
         case 2: volume_screen(); break;
-        case 3: if ((c = choose(MENU_HUD, g_port.hud_off)) >= 0) { g_port.hud_off = c; port_apply(); } break;
-        case 4: if ((c = choose(MENU_ASPECT, g_port.wide)) >= 0) { g_port.wide = c; port_apply(); } break;
-        case 5: if ((c = choose(MENU_FRAMERATE, g_port.framerate)) >= 0) { g_port.framerate = c; port_apply(); } break;
-        case 6: if ((c = choose(MENU_SPEED, g_game_speed)) >= 0) g_game_speed = (int16_t)c; break;
-        case 7: define_keys(); break;
-        case 8: pad_remap(); break;
+        case 3: {
+            int mx = g_front.display_max ? g_front.display_max() : 4;
+            int curc = g_port.display ? (g_port.display <= mx ? g_port.display - 2 : mx - 2) : mx - 1;
+            if ((c = choose(MENU_DISPLAY, curc)) >= 0) { g_port.display = c == mx - 1 ? 0 : c + 2; port_apply(); }
+            break;
+        }
+        case 4: if ((c = choose(MENU_HUD, g_port.hud_off)) >= 0) { g_port.hud_off = c; port_apply(); } break;
+        case 5: if ((c = choose(MENU_ASPECT, g_port.wide)) >= 0) { g_port.wide = c; port_apply(); } break;
+        case 6: if ((c = choose(MENU_FRAMERATE, g_port.framerate)) >= 0) { g_port.framerate = c; port_apply(); } break;
+        case 7: if ((c = choose(MENU_SPEED, g_game_speed)) >= 0) g_game_speed = (int16_t)c; break;
+        case 8: define_keys(); break;
+        case 9: pad_remap(); break;
         default: settings_save(); return;
         }
         if (g_front.quit && g_front.quit()) return;

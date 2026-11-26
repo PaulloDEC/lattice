@@ -29,15 +29,22 @@
 #include "stars.h"
 #include "sound.h"
 #include "music.h"
+#include "gm.h"
 #include "enemy.h"
 #include "frame.h"
 #include "interp.h"
 #include "config.h"
 #include <ctype.h>
+#ifdef _WIN32
+#include <direct.h>
+#define chdir _chdir
+#else
+#include <unistd.h>
+#endif
 
 static SDL_Window *g_win; static SDL_Renderer *g_ren; static SDL_Texture *g_tex;
 static int g_quit, g_dump_at = -1; static const char *g_dump_file; static double s_dump_alpha = -1;
-static uint32_t g_pix[432 * 200];               /* the presented picture, s_pix_w x 200 (320, or 426 wide) */
+static uint32_t g_pix[432 * 200];               /* the presented picture, s_pix_w x 200 (320, or 428 wide) */
 static int s_pix_w = 320;
 
 /* SDL scancode -> DOS set-1 make code (0 = unmapped).  Extended keys use their plain code, as the game's key table does. */
@@ -91,8 +98,55 @@ static int s_fps_cap;                             /* frames per second while smo
 static int s_last_framerate = FR_DISPLAY;         /* what F11 returns to */
 static void view_changed(void);
 static void pad_remapped(void);
+/* Display size: an N x window (N times 320 x 240, or 428 x 240 in 16:9) or desktop fullscreen.  The window is
+ * DPI-aware on Windows (see main), so N x means N screen pixels per game pixel and the picture stays sharp. */
+static int s_display_shown = -1;                  /* what the window was last set to (resizing by hand is left alone) */
+static int s_last_window = 3;                     /* what Alt+Enter returns to from fullscreen */
+static int display_max(void)                      /* the largest N x window that fits the desktop (2..8) */
+{
+    SDL_Rect r; int top = 0, left = 0, bottom = 0, right = 0, n;
+    int di = g_win ? SDL_GetWindowDisplayIndex(g_win) : 0;
+    if (SDL_GetDisplayUsableBounds(di < 0 ? 0 : di, &r) != 0) return 4;
+    if (!g_win || SDL_GetWindowBordersSize(g_win, &top, &left, &bottom, &right) != 0) top = 40;   /* title bar guess */
+    int w = g_port.wide ? 428 : 320;
+    for (n = 8; n > 2; n--) if (n * w + left + right <= r.w && n * 240 + top + bottom <= r.h) break;
+    return n;
+}
+static void apply_display(void)
+{
+    if (!g_win || g_port.display == s_display_shown) return;
+    if (g_port.display) {
+        int n = g_port.display, mx = display_max(); if (n > mx) n = mx;
+        if (SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP) SDL_SetWindowFullscreen(g_win, 0);
+        SDL_SetWindowSize(g_win, (g_port.wide ? 428 : 320) * n, 240 * n);
+        SDL_SetWindowPosition(g_win, SDL_WINDOWPOS_CENTERED_DISPLAY(SDL_GetWindowDisplayIndex(g_win)), SDL_WINDOWPOS_CENTERED_DISPLAY(SDL_GetWindowDisplayIndex(g_win)));
+        s_last_window = g_port.display;
+    } else SDL_SetWindowFullscreen(g_win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    s_display_shown = g_port.display;
+}
+static SDL_AudioDeviceID g_audio; static int s_audio_rate = 44100;
+/* General MIDI: the player's own SoundFont (HOCUS.SF2) if there is one, else the one shipped with the game */
+static const char *const k_sf2[] = { "HOCUS.SF2", "hocus.sf2", "GeneralUser-GS.sf2" };
+static const char *sf2_path(void)
+{
+    for (size_t i = 0; i < sizeof k_sf2 / sizeof *k_sf2; i++) { FILE *f = fopen(k_sf2[i], "rb"); if (f) { fclose(f); return k_sf2[i]; } }
+    return NULL;
+}
+static int gm_available(void) { return gm_ready() || sf2_path() != NULL; }
+static void apply_music(void)                     /* Music device: FM mono / stereo, or General MIDI (loads the SoundFont the first time) */
+{
+    SDL_LockAudioDevice(g_audio);
+    if (g_port.music == MUS_GM && !gm_ready()) {
+        const char *p = sf2_path();
+        if (!p || gm_load(p, s_audio_rate)) g_port.music = MUS_ADLIB;      /* missing or unreadable: back to the AdLib */
+    }
+    music_set_card(g_port.music == MUS_GM ? MUSIC_GM : g_port.music == MUS_SBPRO ? AL_SBPRO : AL_MONO);
+    SDL_UnlockAudioDevice(g_audio);
+}
 static void apply_port(int save)
 {
+    apply_display();
+    if (g_audio) apply_music();
     interp_set_view(g_port.wide, g_port.hud_off); view_changed();
     interp_set_enabled(g_port.framerate != FR_ORIGINAL);
     s_fps_cap = config_fps(g_port.framerate);
@@ -221,8 +275,8 @@ static void pump(void)
         else if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && !e.key.repeat) {
             uint8_t sc = dos_scancode(e.key.keysym.scancode);
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT)) {
-                Uint32 f = SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
-                SDL_SetWindowFullscreen(g_win, f ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP); continue;
+                g_port.display = (SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP) ? s_last_window : 0;   /* = Display size */
+                s_display_shown = -1; apply_display(); if (s_cfg_save) config_save(CFG_PATH); continue;
             }
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11) { toggle_smooth(); continue; }
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F7) { toggle_wide(); continue; }
@@ -436,9 +490,19 @@ static int ui_kbhit(void)
     return s_keys > 0;
 }
 static void pal_entry(int entry, int slot) { uint32_t n; uint8_t *p = dat_load(entry, &n); if (p) { video_load_palette(p, n, slot, 0); free(p); } }
-static SDL_AudioDeviceID g_audio;
 static void play_sfx(int id) { if (interp_speculating()) return; SDL_LockAudioDevice(g_audio); sound_play(id); SDL_UnlockAudioDevice(g_audio); }   /* the mixer runs on the audio thread */
-static void audio_cb(void *ud, Uint8 *stream, int len) { (void)ud; memset(stream, 0, len); sound_mix((int16_t *)stream, len / 2); music_render((int16_t *)stream, len / 2); }
+static void audio_cb(void *ud, Uint8 *stream, int len)          /* stereo: the effects (mono) in the middle, the music in stereo */
+{
+    (void)ud; int16_t *out = (int16_t *)stream; int frames = len / 4;
+    static int16_t mono[8192];
+    while (frames > 0) {
+        int n = frames < 8192 ? frames : 8192;
+        memset(mono, 0, n * 2); sound_mix(mono, n);
+        for (int i = 0; i < n; i++) out[2 * i] = out[2 * i + 1] = mono[i];
+        music_render(out, n);
+        out += 2 * n; frames -= n;
+    }
+}
 static void play_music(int entry, int loop)       /* 136b:01FF: stop the current song, load the DAT entry, play it (only while music is on) */
 {
     uint32_t n; uint8_t *p = g_music_on ? dat_load(entry, &n) : NULL;
@@ -533,7 +597,7 @@ static void tick_shown_main(void)
 int main(int argc, char **argv)
 {
     int smooth = 0, runahead = 1, wide = 0, hudoff = 0;
-    const char *dat = "HOCUS.DAT"; int episode = 0, level = 0, scale = 3, full = 0, frames = -1, end_test = -1, direct = 0; const char *test_screen = NULL;
+    const char *dat = "HOCUS.DAT"; int episode = 0, level = 0, scale = 0, full = 0, frames = -1, end_test = -1, direct = 0; const char *test_screen = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dat") && i + 1 < argc) dat = argv[++i];
         else if (!strcmp(argv[i], "--episode") && i + 1 < argc) { episode = atoi(argv[++i]); direct = 1; }
@@ -563,10 +627,29 @@ int main(int argc, char **argv)
     if (frames >= 0 && g_dump_file) g_dump_at = frames;
     /* the port's settings: HOCUS.CFG, then the command line on top (not saved unless changed in the menu);
      * test runs (dumps, scripted input) use the defaults with smoothing off and never touch the file */
+    /* The game folder: HOCUS.DAT, HOCUS.SAV and HOCUS.CFG are opened relative to the working directory.  Started by a
+     * double-click (Linux file managers start it in the home folder), that isn't the program's folder: when HOCUS.DAT
+     * isn't here but is next to the executable, work there. */
+    if (!strcmp(dat, "HOCUS.DAT")) {
+        FILE *t = fopen(dat, "rb");
+        if (t) fclose(t);
+        else {
+            char *base = SDL_GetBasePath();
+            if (base) {
+                char path[4096]; snprintf(path, sizeof path, "%sHOCUS.DAT", base);
+                if ((t = fopen(path, "rb")) != NULL) { fclose(t); if (chdir(base) != 0) dat = NULL; }
+                if (!dat) dat = "HOCUS.DAT";
+                SDL_free(base);
+            }
+        }
+    }
     if (g_dump_file || s_script || s_pad_script || s_check || s_hash_f) { s_cfg_save = 0; config_defaults(); g_port.framerate = FR_ORIGINAL; }
     else config_load(CFG_PATH);
     if (wide) g_port.wide = 1;
     if (hudoff) g_port.hud_off = 1;
+    if (scale >= 2 && scale <= 8) g_port.display = scale;     /* --scale / --fullscreen: Display size for this run */
+    else if (scale == 1) g_port.display = 2;
+    if (full) g_port.display = 0;
     for (int i = 1; i + 1 < argc; i++)                /* --pad-map jump=Y (tests): a Controller Remap binding */
         if (!strcmp(argv[i], "--pad-map")) {
             static const char *an[PAD_ACTIONS] = { "jump", "fire", "look_up", "look_down", "pause" };
@@ -585,19 +668,24 @@ int main(int argc, char **argv)
     { uint32_t n; uint8_t *f = dat_load(0, &n); if (!f || n < 720) { fatal("Bad HOCUS.DAT (font)."); return 1; } ui_set_font(f);   /* kept for the whole run */
       uint8_t *t = dat_load(5, &n); if (!t || n < 2880) { fatal("Bad HOCUS.DAT (star table)."); return 1; } stars_set_table(t); free(t); }
 
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");    /* Windows: real pixels, no blurry DPI stretching */
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");   /* A = bottom face button on every pad (Nintendo layouts too) */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
-    g_win = SDL_CreateWindow("Hocus Pocus", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (g_port.wide ? 426 : 320) * scale, 240 * scale,
-                             SDL_WINDOW_RESIZABLE | (full ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
+    g_win = SDL_CreateWindow("Hocus Pocus", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (g_port.wide ? 428 : 320) * 2, 240 * 2,
+                             SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | (g_port.display ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP));   /* sized by apply_display, then shown */
+    if (!g_port.display) s_display_shown = 0;
     g_ren = g_win ? SDL_CreateRenderer(g_win, -1, SDL_RENDERER_PRESENTVSYNC) : NULL;
     if (!g_ren && g_win) g_ren = SDL_CreateRenderer(g_win, -1, 0);
     if (!g_ren) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
-    s_tex_w = 0; set_tex_width(g_port.wide ? 426 : 320);
+    s_tex_w = 0; set_tex_width(g_port.wide ? 428 : 320);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    if (g_port.display) s_last_window = g_port.display;
+    apply_display(); SDL_ShowWindow(g_win);
 
-    { SDL_AudioSpec want, have; SDL_zero(want); want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 1; want.samples = 1024; want.callback = audio_cb;
+    { SDL_AudioSpec want, have; SDL_zero(want); want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024; want.callback = audio_cb;
       SDL_AudioDeviceID dev = g_audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);     /* no audio device (CI, headless): the game runs silent */
-      sound_init(dev ? have.freq : 44100); music_init(dev ? have.freq : 44100);
+      s_audio_rate = dev ? have.freq : 44100;
+      sound_init(s_audio_rate); music_init(s_audio_rate);
       if (dev) { SDL_PauseAudioDevice(dev, 0); g_sound_on = 1; g_sound_hw = 1; game_set_sound_callback(play_sfx); g_loop_hooks.music = play_music; g_loop_hooks.music_off = stop_music; g_level_hooks.music = play_music; g_music_on = 1; } }
     pad_open_first();                             /* later pads are picked up by SDL_CONTROLLERDEVICEADDED */
     input_init_defaults();
@@ -620,7 +708,7 @@ int main(int argc, char **argv)
     if (end_test >= 0) { pal_entry(DAT_PAL_LO, 0); pal_entry(DAT_PAL_HI, 128); g_exit_clock = 140 * 100; ui_end_screen(end_test, 12, 9); SDL_Quit(); return 0; }
     g_front.key = menu_key; g_front.pace = front_pace; g_front.quit = front_quit; g_front.music = play_music; g_front.music_off = stop_music;
     g_front.pal = pal_entry; g_front.img = ui_img; g_front.flush_keys = menu_flush; g_front.apply_volume = apply_volume; g_front.sfx = play_sfx; g_front.ticks = SDL_GetTicks; g_front.text = text_key; g_front.voc = play_voc;
-    g_front.port_apply = front_port_apply; g_front.pad_button = front_pad_button;
+    g_front.port_apply = front_port_apply; g_front.pad_button = front_pad_button; g_front.display_max = display_max; g_front.sound_hw = g_sound_hw; g_front.gm_available = gm_available;
     if (test_screen) {                                /* --test-screen endN | hs: show one front-end screen (with --keys / --frames / --dump) */
         pal_entry(DAT_PAL_LO, 0); pal_entry(DAT_PAL_HI, 128);
         if (!strcmp(test_screen, "demo")) frontend_demo();

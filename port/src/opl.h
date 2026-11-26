@@ -3,7 +3,10 @@
 #define HOCUS_OPL_H
 #include <stdint.h>
 #define OPL_RATE 49716
-void opl_reset(void);
-void opl_write(int reg, int val);
-int  opl_sample(void);              /* next sample at OPL_RATE, roughly -32768..32767 */
+#define OPL_CHIPS 2                 /* two chips: stereo FM (left / right) */
+void opl_reset(void);               /* both chips */
+void opl_write(int reg, int val);   /* chip 0 */
+int  opl_sample(void);              /* chip 0: next sample at OPL_RATE, roughly -32768..32767 */
+void opl_write_chip(int chip, int reg, int val);
+int  opl_sample_chip(int chip);
 #endif
