@@ -74,6 +74,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout code (for the SoundFont)
+        uses: actions/checkout@v4
+
       - name: Install zip tool
         run: |
           sudo apt-get update
@@ -86,9 +89,9 @@ jobs:
 
       - name: Prepare release assets
         run: |
-          mkdir -p release_assets win_bundle
-          cp artifacts/hocus-linux/hocus release_assets/hocus-linux
-          chmod +x release_assets/hocus-linux
+          mkdir -p release_assets win_bundle linux_bundle
+          cp artifacts/hocus-linux/hocus linux_bundle/hocus
+          chmod +x linux_bundle/hocus
 
           # Handle Windows output whether named hocus.exe or hocus
           if [ -f artifacts/hocus-windows/hocus.exe ]; then
@@ -99,13 +102,19 @@ jobs:
 
           cp artifacts/hocus-windows/SDL2.dll win_bundle/SDL2.dll
 
-          (cd win_bundle && zip -r ../release_assets/hocus-windows.zip hocus.exe SDL2.dll)
+          # General MIDI music: the SoundFont and its licence go next to the program in both downloads
+          for b in win_bundle linux_bundle; do
+            cp port/GeneralUser-GS.sf2 port/GeneralUser-GS-LICENSE.txt $b/
+          done
+
+          (cd win_bundle && zip -r ../release_assets/hocus-windows.zip hocus.exe SDL2.dll GeneralUser-GS.sf2 GeneralUser-GS-LICENSE.txt)
+          (cd linux_bundle && zip -r ../release_assets/hocus-linux.zip hocus GeneralUser-GS.sf2 GeneralUser-GS-LICENSE.txt)
           ls -la release_assets/
 
       - name: Create Release and upload binaries
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            release_assets/hocus-linux
+            release_assets/hocus-linux.zip
             release_assets/hocus-windows.zip
           generate_release_notes: true
