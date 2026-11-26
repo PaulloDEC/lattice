@@ -29,7 +29,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hocus-linux
-          path: port/hocus
+          path: |
+            port/hocus
+            port/GeneralUser-GS.sf2
+            port/GeneralUser-GS-LICENSE.txt
 
   build-windows:
     runs-on: windows-latest
@@ -65,6 +68,8 @@ jobs:
           path: |
             port/hocus*
             port/SDL2.dll
+            port/GeneralUser-GS.sf2
+            port/GeneralUser-GS-LICENSE.txt
 
   publish-release:
     runs-on: ubuntu-latest
