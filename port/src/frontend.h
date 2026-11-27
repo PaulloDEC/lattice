@@ -21,6 +21,7 @@
 #define FK_LEFT  0x14B
 #define FK_RIGHT 0x14D
 #define FK_END   0x14F
+#define FK_CLEAR 0x200                  /* port: Backspace / Delete / pad Y - clear a binding on the remap screens */
 #define FK_PGDN  0x151
 
 typedef struct FrontHooks {
@@ -39,7 +40,9 @@ typedef struct FrontHooks {
     void (*voc)(int entry);             /* 136B:01B8 play one digitised sound (DAT entry) */
     /* port: */
     void (*port_apply)(void);           /* g_port (config.h) changed: apply it and save HOCUS.CFG */
-    int  (*pad_button)(void);           /* next controller button press (config.h codes), -1 = none */
+    int  (*pad_button)(void);           /* next controller press: button, trigger or stick direction (config.h codes), -1 = none */
+    int  (*key_capture)(void);          /* next key press as an SDL scancode, -1 = none (Keyboard Remap) */
+    const char *(*key_name)(int scancode);
     int  (*display_max)(void);
     int  sound_hw;                      /* an audio device is open (music needs one) */
     int  (*gm_available)(void);         /* a SoundFont for General MIDI is next to the program */          /* the largest window multiple (2..8) that fits the current display */
@@ -48,7 +51,7 @@ extern FrontHooks g_front;
 
 /* Menu ids of 06B8:0B21 */
 enum { MENU_MAIN, MENU_EPISODE, MENU_OPTIONS, MENU_LEVEL, MENU_SKILL, MENU_GAME, MENU_SPEED = 7,
-       MENU_HUD, MENU_ASPECT, MENU_FRAMERATE, MENU_PAD, MENU_DISPLAY, MENU_MUSICDEV, MENU_COUNT };   /* 8.. the port's */
+       MENU_HUD, MENU_ASPECT, MENU_FRAMERATE, MENU_DISPLAY, MENU_MUSICDEV, MENU_COUNT };   /* 8.. the port's */
 
 /* 0B21 + 19A4 + 2259: returns the selected item (0-based, title excluded), 0xFF for Esc, 0x9D for the idle time-out. */
 int  menu_show(int id, int main_flag);

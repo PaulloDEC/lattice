@@ -231,7 +231,9 @@ static int s_tq[64], s_tqn;                      /* typed characters (name entry
 static void tq_push(int c) { if (s_tqn < 64) s_tq[s_tqn++] = c; }
 static int text_key(void) { if (!s_tqn) return 0; int c = s_tq[0]; memmove(s_tq, s_tq + 1, (--s_tqn) * sizeof(int)); return c; }
 static int s_padq_n;
-static void menu_flush(void) { s_kqn = 0; s_tqn = 0; s_padq_n = 0; }
+static int s_scq[8], s_scq_n;                     /* raw key presses (SDL scancodes) for Keyboard Remap (g_front.key_capture) */
+static void menu_flush(void) { s_kqn = 0; s_tqn = 0; s_padq_n = 0; s_scq_n = 0; }
+static int key_action_input(SDL_Scancode k, int down); static int is_wire(uint8_t sc);
 static void pad_open_first(void); static void pad_release_all(void); static void pad_button(int b, int down); static void pad_axis(int a, int v);
 static SDL_GameController *s_pad;
 static void pad_script_step(void);
@@ -283,7 +285,12 @@ static void pump(void)
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F8) { toggle_hud(); continue; }
             if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && (e.key.keysym.scancode == SDL_SCANCODE_F7 || e.key.keysym.scancode == SDL_SCANCODE_F8 ||
                 e.key.keysym.scancode == SDL_SCANCODE_F11 || e.key.keysym.scancode == SDL_SCANCODE_F12)) continue;    /* port keys: never seen by the game */
-            if (e.type == SDL_KEYDOWN && sc && s_keys < 16) s_keys++;
+            if (e.type == SDL_KEYDOWN && s_keys < 16) s_keys++;
+            if (e.type == SDL_KEYDOWN && s_scq_n < 8) s_scq[s_scq_n++] = (int)e.key.keysym.scancode;
+            int bound = key_action_input(e.key.keysym.scancode, e.type == SDL_KEYDOWN);   /* remapped actions (any key) */
+            if (bound || is_wire(sc)) sc = 0;           /* the game sees actions only through their wire keys */
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_BACKSPACE) kq_push(FK_CLEAR);
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_DELETE) kq_push(FK_CLEAR);
             if (e.type == SDL_KEYDOWN) {
                 SDL_Keycode k = e.key.keysym.sym;
                 if (k == SDLK_UP) kq_push(FK_UP); else if (k == SDLK_DOWN) kq_push(FK_DOWN);
@@ -298,35 +305,48 @@ static void pump(void)
     }
 }
 
-/* ---- game controller (SDL GameController: Xbox-style layout, so the Steam Deck and most pads work) ----
- * Game actions: each pad input drives a virtual button; a virtual button behaves like pressing a key: it sends the
- * DOS scancode of the key currently bound to its action (so Keyboard Remap still applies) and counts as a key press
- * for "press any key" screens.  Several inputs can hold one virtual button (D-pad and stick, A and LT): it is down
- * while any of them is.  Jump / fire / look up / look down / pause come from Controller Remap (g_port.pad, config.h);
- * B (fire), LT (jump) and RT (fire) work as extras while not assigned to anything.  Fixed: D-pad / left stick move,
- * right stick looks, Menu (Start) = Esc (opens / closes the in-game menu).
- * Menu keys are fixed per physical button: D-pad / stick navigate, A = Enter, B / Menu = Esc, LB / RB = page up / down. */
-enum { VB_LEFT, VB_RIGHT, VB_UP, VB_DOWN, VB_JUMP, VB_FIRE, VB_LOOKUP, VB_LOOKDN, VB_PAUSE, VB_START, VB_COUNT };
-static uint64_t s_vb_src[VB_COUNT];               /* bit per pad input holding the virtual button */
+/* ---- remappable input: keyboard and game controller (SDL GameController: Xbox-style layout, so the Steam Deck and most pads work) ----
+ * Every action (Keyboard Remap / Controller Remap, g_port.key / g_port.pad, config.h) drives a virtual button; a virtual button
+ * behaves like the game's own key for that action: it sends that DOS scancode (the "wire" key: the original's default binding,
+ * P for pause) and counts as a key press for "press any key" screens.  Several inputs can hold one virtual button (two keys,
+ * D-pad and stick): it is down while any of them is.  A key bound to an action never reaches the game as itself, and the wire
+ * keys never reach it except through their action - so a moved binding leaves nothing behind (e.g. Ctrl after Jump moved
+ * to Space) and a bound letter overrides the game's shortcut on it (P, M, S, V, C).  Fixed: Esc, F1..F12; Menu (Start) = Esc.
+ * Menu navigation is fixed per physical input: arrows / D-pad / left stick move, Enter / A select, Esc / B / Menu back,
+ * PgUp / PgDn / LB / RB page, Backspace / Y clear (remap screens). */
+enum { VB_LEFT, VB_RIGHT, VB_UP, VB_DOWN, VB_JUMP, VB_FIRE, VB_LOOKUP, VB_LOOKDN, VB_PAUSE, VB_START, VB_COUNT };   /* = BIND_* order, then Start */
+#define SRC_WORDS 10                              /* input sources: pad codes 0..49, keyboard 64 + SDL scancode (< 576) */
+static uint64_t s_vb_src[VB_COUNT][SRC_WORDS];
 static int s_axis[SDL_CONTROLLER_AXIS_MAX];       /* -1 / 0 / +1 per axis after the dead zone */
-static int s_padq[8];                             /* raw button presses for Controller Remap (g_front.pad_button) */
+static int s_padq[8];                             /* raw pad inputs for Controller Remap (g_front.pad_button) */
 
-static void vb_emit(int vb, int down)
+static uint8_t vb_wire(int vb)
 {
     static const int act[VB_COUNT] = { ACT_LEFT, ACT_RIGHT, ACT_UP, ACT_DOWN, ACT_JUMP, ACT_FIRE, ACT_SCROLL_UP, ACT_SCROLL_DOWN, -1, -1 };
-    uint8_t sc = act[vb] >= 0 ? g_key_scancode[g_binding[act[vb]]] : vb == VB_START ? 0x01 : 0x19;
-    game_key(down ? sc : (uint8_t)(sc | 0x80));
+    return act[vb] >= 0 ? g_key_scancode[g_binding[act[vb]]] : vb == VB_START ? 0x01 : 0x19;
 }
+static int is_wire(uint8_t sc) { for (int vb = 0; vb < VB_PAUSE + 1; vb++) if (vb_wire(vb) == sc) return 1; return 0; }
+static void vb_emit(int vb, int down) { uint8_t sc = vb_wire(vb); game_key(down ? sc : (uint8_t)(sc | 0x80)); }
+static int vb_held(int vb) { for (int w = 0; w < SRC_WORDS; w++) if (s_vb_src[vb][w]) return 1; return 0; }
 static void vb_set(int vb, int src, int down)
 {
-    uint64_t was = s_vb_src[vb];
-    if (down) s_vb_src[vb] |= 1ull << src; else s_vb_src[vb] &= ~(1ull << src);
-    if (!was != !s_vb_src[vb]) vb_emit(vb, s_vb_src[vb] != 0);
+    int was = vb_held(vb);
+    if (down) s_vb_src[vb][src >> 6] |= 1ull << (src & 63); else s_vb_src[vb][src >> 6] &= ~(1ull << (src & 63));
+    if (was != vb_held(vb)) vb_emit(vb, !was);
 }
-static void pad_release_all(void)
+static void input_release_all(void)
 {
-    for (int vb = 0; vb < VB_COUNT; vb++) if (s_vb_src[vb]) { s_vb_src[vb] = 0; vb_emit(vb, 0); }
+    for (int vb = 0; vb < VB_COUNT; vb++) if (vb_held(vb)) { memset(s_vb_src[vb], 0, sizeof s_vb_src[vb]); vb_emit(vb, 0); }
     memset(s_axis, 0, sizeof s_axis);
+}
+static void pad_release_all(void) { input_release_all(); }
+static int key_action_input(SDL_Scancode k, int down)   /* a key bound to actions: drive them; 1 = it is bound */
+{
+    int bound = 0;
+    for (int a = 0; a < BIND_ACTIONS; a++)
+        for (int sl = 0; sl < BIND_SLOTS; sl++)
+            if (g_port.key[a][sl] == (int)k) { vb_set(a, 64 + (int)k, down); bound = 1; }
+    return bound;
 }
 static void pad_open_first(void)
 {
@@ -334,40 +354,27 @@ static void pad_open_first(void)
     for (int i = 0; i < SDL_NumJoysticks(); i++)
         if (SDL_IsGameController(i) && (s_pad = SDL_GameControllerOpen(i)) != NULL) return;
 }
-static int pad_vb_for(int code)                   /* the remappable action a button / trigger drives, or -1 */
-{
-    static const int vb[PAD_ACTIONS] = { VB_JUMP, VB_FIRE, VB_LOOKUP, VB_LOOKDN, VB_PAUSE };
-    for (int a = 0; a < PAD_ACTIONS; a++) if (g_port.pad[a] == code) return vb[a];
-    if (code == SDL_CONTROLLER_BUTTON_B) return VB_FIRE;          /* extras while unassigned */
-    if (code == PAD_LT) return VB_JUMP;
-    if (code == PAD_RT) return VB_FIRE;
-    return -1;
-}
-static void pad_input(int code, int down)         /* a button or trigger (code as config.h) */
+static void pad_input(int code, int down)         /* a button, trigger or stick direction (config.h codes) */
 {
     if (down && s_keys < 16) s_keys++;
     if (down && s_padq_n < 8) s_padq[s_padq_n++] = code;
     if (down) {                                   /* fixed menu keys */
         int mk = code == SDL_CONTROLLER_BUTTON_A ? FK_ENTER : code == SDL_CONTROLLER_BUTTON_B ? FK_ESC :
                  code == SDL_CONTROLLER_BUTTON_START ? FK_ESC : code == SDL_CONTROLLER_BUTTON_LEFTSHOULDER ? FK_PGUP :
-                 code == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER ? FK_PGDN : code == SDL_CONTROLLER_BUTTON_DPAD_UP ? FK_UP :
-                 code == SDL_CONTROLLER_BUTTON_DPAD_DOWN ? FK_DOWN : code == SDL_CONTROLLER_BUTTON_DPAD_LEFT ? FK_LEFT :
-                 code == SDL_CONTROLLER_BUTTON_DPAD_RIGHT ? FK_RIGHT : 0;
+                 code == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER ? FK_PGDN : code == SDL_CONTROLLER_BUTTON_Y ? FK_CLEAR :
+                 code == SDL_CONTROLLER_BUTTON_DPAD_UP || code == PAD_LS_LEFT + 2 ? FK_UP :
+                 code == SDL_CONTROLLER_BUTTON_DPAD_DOWN || code == PAD_LS_LEFT + 3 ? FK_DOWN :
+                 code == SDL_CONTROLLER_BUTTON_DPAD_LEFT || code == PAD_LS_LEFT ? FK_LEFT :
+                 code == SDL_CONTROLLER_BUTTON_DPAD_RIGHT || code == PAD_LS_LEFT + 1 ? FK_RIGHT : 0;
         if (mk) kq_push(mk);
     }
-    switch (code) {
-    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  vb_set(VB_LEFT, code, down); return;
-    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: vb_set(VB_RIGHT, code, down); return;
-    case SDL_CONTROLLER_BUTTON_DPAD_UP:    vb_set(VB_UP, code, down); return;
-    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  vb_set(VB_DOWN, code, down); return;
-    case SDL_CONTROLLER_BUTTON_START:      vb_set(VB_START, code, down); return;
-    default: break;
-    }
-    int vb = pad_vb_for(code);
-    if (vb >= 0) vb_set(vb, code, down);
+    if (code == SDL_CONTROLLER_BUTTON_START) { vb_set(VB_START, code, down); return; }
+    for (int a = 0; a < BIND_ACTIONS; a++)
+        for (int sl = 0; sl < BIND_SLOTS; sl++)
+            if (g_port.pad[a][sl] == code) vb_set(a, code, down);
 }
 static void pad_button(int b, int down) { pad_input(b, down); }
-static void pad_remapped(void) { pad_release_all(); }   /* bindings changed: nothing stays held under an old one */
+static void pad_remapped(void) { input_release_all(); }   /* bindings changed: nothing stays held under an old one */
 static int front_pad_button(void)
 {
     if (!s_padq_n) return -1;
@@ -375,6 +382,14 @@ static int front_pad_button(void)
     memmove(s_padq, s_padq + 1, (size_t)--s_padq_n * sizeof s_padq[0]);
     return c;
 }
+static int front_key_capture(void)
+{
+    if (!s_scq_n) return -1;
+    int c = s_scq[0];
+    memmove(s_scq, s_scq + 1, (size_t)--s_scq_n * sizeof s_scq[0]);
+    return c;
+}
+static const char *front_key_name(int sc) { return config_key_name(sc); }
 static void pad_axis(int a, int v)
 {
     int st;                                       /* dead zone with hysteresis: engage past 50%, release under 35% */
@@ -384,19 +399,15 @@ static void pad_axis(int a, int v)
     else
         st = v < (prev < 0 ? -11500 : -16400) ? -1 : v > (prev > 0 ? 11500 : 16400) ? 1 : 0;
     if (st == prev) return;
-    int was = prev;
     s_axis[a] = st;
-    int src = 24 + a;                             /* sticks: sources 24..27 (buttons are 0..20, triggers 40 / 41) */
     switch (a) {
-    case SDL_CONTROLLER_AXIS_LEFTX:
-        if (st && st != was) kq_push(st < 0 ? FK_LEFT : FK_RIGHT);
-        if (st && s_keys < 16) s_keys++;
-        vb_set(VB_LEFT, src, st < 0); vb_set(VB_RIGHT, src, st > 0); break;
-    case SDL_CONTROLLER_AXIS_LEFTY:
-        if (st && st != was) kq_push(st < 0 ? FK_UP : FK_DOWN);
-        if (st && s_keys < 16) s_keys++;
-        vb_set(VB_UP, src, st < 0); vb_set(VB_DOWN, src, st > 0); break;
-    case SDL_CONTROLLER_AXIS_RIGHTY: vb_set(VB_LOOKUP, src, st < 0); vb_set(VB_LOOKDN, src, st > 0); break;
+    case SDL_CONTROLLER_AXIS_LEFTX: case SDL_CONTROLLER_AXIS_LEFTY: case SDL_CONTROLLER_AXIS_RIGHTX: case SDL_CONTROLLER_AXIS_RIGHTY: {
+        int base = (a == SDL_CONTROLLER_AXIS_LEFTX || a == SDL_CONTROLLER_AXIS_LEFTY ? PAD_LS_LEFT : PAD_RS_LEFT)
+                 + (a == SDL_CONTROLLER_AXIS_LEFTY || a == SDL_CONTROLLER_AXIS_RIGHTY ? 2 : 0);    /* + 0 = left / up, + 1 = right / down */
+        if (prev) pad_input(base + (prev > 0), 0);
+        if (st) pad_input(base + (st > 0), 1);
+        break;
+    }
     case SDL_CONTROLLER_AXIS_TRIGGERLEFT:  pad_input(PAD_LT, st); break;
     case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: pad_input(PAD_RT, st); break;
     default: break;
@@ -408,8 +419,26 @@ static void pad_axis(int a, int v)
  * before the next tick).  '>' / '<' toggle
  * holding the left stick right / left, 'j' toggles holding the right trigger; '.' waits one step. */
 static const char *s_pad_script; static int s_pad_vj = -1, s_pad_tick, s_pad_release = -1;
+/* --kev "+Right,.,-Right,+D" (test): real SDL key events through the whole input path (remapping included), one token per
+ * 30 menu iterations / game frames: +Name = key down, -Name = key up (SDL scancode names), '.' = wait. */
+static const char *s_kev_script; static int s_kev_tick;
+static void kev_script_step(void)
+{
+    if (!s_kev_script || !*s_kev_script || ++s_kev_tick % 30) return;
+    const char *e = strchr(s_kev_script, ','); size_t n = e ? (size_t)(e - s_kev_script) : strlen(s_kev_script);
+    char t[40] = ""; if (n < sizeof t) { memcpy(t, s_kev_script, n); t[n] = 0; }
+    s_kev_script += n + (e ? 1 : 0);
+    if ((t[0] == '+' || t[0] == '-') && t[1]) {
+        SDL_Event ev; SDL_zero(ev);
+        ev.type = t[0] == '+' ? SDL_KEYDOWN : SDL_KEYUP;
+        ev.key.keysym.scancode = SDL_GetScancodeFromName(t + 1); ev.key.keysym.sym = SDL_GetKeyFromScancode(ev.key.keysym.scancode);
+        ev.key.state = t[0] == '+' ? SDL_PRESSED : SDL_RELEASED;
+        SDL_PushEvent(&ev);
+    }
+}
 static void pad_script_step(void)
 {
+    kev_script_step();
 #if SDL_VERSION_ATLEAST(2, 0, 14)
     static int hold_x, hold_t;
     if (!s_pad_script) return;
@@ -609,6 +638,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pad") && i + 1 < argc) s_pad_script = argv[++i];
         else if (!strcmp(argv[i], "--smooth")) smooth = 1;
         else if (!strcmp(argv[i], "--pad-map") && i + 1 < argc) i++;     /* applied after the config (below) */
+        else if (!strcmp(argv[i], "--key-map") && i + 1 < argc) i++;
+        else if (!strcmp(argv[i], "--kev") && i + 1 < argc) s_kev_script = argv[++i];
         else if (!strcmp(argv[i], "--wide")) wide = 1;
         else if (!strcmp(argv[i], "--hud-off")) hudoff = 1;
         else if (!strcmp(argv[i], "--dump-poll") && i + 1 < argc) s_dump_poll = atoi(argv[++i]);
@@ -643,7 +674,7 @@ int main(int argc, char **argv)
             }
         }
     }
-    if (g_dump_file || s_script || s_pad_script || s_check || s_hash_f) { s_cfg_save = 0; config_defaults(); g_port.framerate = FR_ORIGINAL; }
+    if (g_dump_file || s_script || s_pad_script || s_kev_script || s_check || s_hash_f) { s_cfg_save = 0; config_defaults(); g_port.framerate = FR_ORIGINAL; }
     else config_load(CFG_PATH);
     if (wide) g_port.wide = 1;
     if (hudoff) g_port.hud_off = 1;
@@ -652,12 +683,21 @@ int main(int argc, char **argv)
     if (full) g_port.display = 0;
     for (int i = 1; i + 1 < argc; i++)                /* --pad-map jump=Y (tests): a Controller Remap binding */
         if (!strcmp(argv[i], "--pad-map")) {
-            static const char *an[PAD_ACTIONS] = { "jump", "fire", "look_up", "look_down", "pause" };
+            static const char *an[BIND_ACTIONS] = { "left", "right", "up", "down", "jump", "fire", "look_up", "look_down", "pause" };
             char k[32] = ""; const char *eq = strchr(argv[i + 1], '=');
             if (eq && eq - argv[i + 1] < 31) { memcpy(k, argv[i + 1], (size_t)(eq - argv[i + 1])); k[eq - argv[i + 1]] = 0; }
-            for (int a = 0; a < PAD_ACTIONS; a++)
-                for (int b = 0; b <= PAD_RT; b++)
-                    if (eq && !strcmp(k, an[a]) && !strcmp(eq + 1, config_pad_name(b)) && config_pad_assignable(b)) g_port.pad[a] = b;
+            for (int a = 0; a < BIND_ACTIONS; a++)
+                for (int b = 0; b < PAD_CODES; b++)
+                    if (eq && !strcmp(k, an[a]) && !strcmp(eq + 1, config_pad_name(b)) && config_pad_assignable(b)) config_bind_pad(a, 0, b);
+        }
+    for (int i = 1; i + 1 < argc; i++)                /* --key-map jump2=Space (tests): a Keyboard Remap binding ("-" clears) */
+        if (!strcmp(argv[i], "--key-map")) {
+            static const char *an[BIND_ACTIONS] = { "left", "right", "up", "down", "jump", "fire", "look_up", "look_down", "pause" };
+            char k[32] = ""; const char *eq = strchr(argv[i + 1], '=');
+            if (eq && eq - argv[i + 1] < 31) { memcpy(k, argv[i + 1], (size_t)(eq - argv[i + 1])); k[eq - argv[i + 1]] = 0; }
+            size_t kl = strlen(k); int slot = kl && k[kl - 1] == '2'; if (slot) k[kl - 1] = 0;
+            for (int a = 0; eq && a < BIND_ACTIONS; a++)
+                if (!strcmp(k, an[a])) config_bind_key(a, slot, strcmp(eq + 1, "-") ? (int)SDL_GetScancodeFromName(eq + 1) : 0);
         }
     if (smooth) g_port.framerate = FR_DISPLAY;
     if (dat_open(dat)) { char m[512]; snprintf(m, sizeof m, "Cannot open %s.\nCopy HOCUS.DAT from the registered Hocus Pocus v1.1 next to the program, or use --dat.", dat); fatal(m); return 1; }
@@ -690,7 +730,15 @@ int main(int argc, char **argv)
     pad_open_first();                             /* later pads are picked up by SDL_CONTROLLERDEVICEADDED */
     input_init_defaults();
     { int hw = g_sound_hw; g_front.apply_volume = apply_volume; settings_load("HOCUS.SAV"); if (!hw) { g_sound_on = 0; g_music_on = 0; } }
-    input_init_defaults(); input_reset();
+    if (!g_port.keys_from_cfg) {                  /* first run with remappable keys: the keyboard setup of HOCUS.SAV, once */
+        static const int sdl[18] = { SDL_SCANCODE_LSHIFT, SDL_SCANCODE_RSHIFT, SDL_SCANCODE_LCTRL, SDL_SCANCODE_LALT, SDL_SCANCODE_CAPSLOCK,
+            SDL_SCANCODE_SPACE, SDL_SCANCODE_RETURN, SDL_SCANCODE_INSERT, SDL_SCANCODE_DELETE, SDL_SCANCODE_HOME, SDL_SCANCODE_END,
+            SDL_SCANCODE_PAGEUP, SDL_SCANCODE_PAGEDOWN, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_KP_5 };
+        static const int act[8] = { BIND_LEFT, BIND_RIGHT, BIND_JUMP, BIND_FIRE, BIND_UP, BIND_DOWN, BIND_LOOKUP, BIND_LOOKDOWN };   /* ACT_* order */
+        int any = 0; for (int i = 0; i < 8; i++) any |= g_binding[i] != (uint8_t)(i == 0 ? 15 : i == 1 ? 16 : i == 2 ? 2 : i == 3 ? 3 : i == 4 ? 13 : i == 5 ? 14 : i == 6 ? 11 : 12);
+        if (any) for (int i = 0; i < 8; i++) config_bind_key(act[i], 0, sdl[g_binding[i] % 18]);
+    }
+    input_init_defaults(); input_reset();          /* the game's own bindings stay the defaults: they are the wire keys */
     vga_reset(); video_init(); video_set_vsync_callback(vsync);
     timer_init(NULL, idle);
     loop_install_defaults();
@@ -708,7 +756,7 @@ int main(int argc, char **argv)
     if (end_test >= 0) { pal_entry(DAT_PAL_LO, 0); pal_entry(DAT_PAL_HI, 128); g_exit_clock = 140 * 100; ui_end_screen(end_test, 12, 9); SDL_Quit(); return 0; }
     g_front.key = menu_key; g_front.pace = front_pace; g_front.quit = front_quit; g_front.music = play_music; g_front.music_off = stop_music;
     g_front.pal = pal_entry; g_front.img = ui_img; g_front.flush_keys = menu_flush; g_front.apply_volume = apply_volume; g_front.sfx = play_sfx; g_front.ticks = SDL_GetTicks; g_front.text = text_key; g_front.voc = play_voc;
-    g_front.port_apply = front_port_apply; g_front.pad_button = front_pad_button; g_front.display_max = display_max; g_front.sound_hw = g_sound_hw; g_front.gm_available = gm_available;
+    g_front.port_apply = front_port_apply; g_front.pad_button = front_pad_button; g_front.key_capture = front_key_capture; g_front.key_name = front_key_name; g_front.display_max = display_max; g_front.sound_hw = g_sound_hw; g_front.gm_available = gm_available;
     if (test_screen) {                                /* --test-screen endN | hs: show one front-end screen (with --keys / --frames / --dump) */
         pal_entry(DAT_PAL_LO, 0); pal_entry(DAT_PAL_HI, 128);
         if (!strcmp(test_screen, "demo")) frontend_demo();

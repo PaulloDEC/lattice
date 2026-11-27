@@ -87,7 +87,6 @@ static const char *k_music[]  = { "Select Music", "Off", "AdLib (mono FM)", "Sou
 static const char *k_hud[]    = { "Select HUD Style", "Classic", "Off" };
 static const char *k_aspect[] = { "Select Aspect Ratio", "Classic (4:3)", "Widescreen (16:9)" };
 static const char *k_frate[]  = { "Select Framerate", "Original", "30 fps", "60 fps", "120 fps", "Display rate" };
-static const char *k_padact[PAD_ACTIONS] = { "Jump", "Fire", "Look up", "Look down", "Pause" };
 static const char k_hint[] = "Use UP/DOWN/LETTER to move - ENTER to select";
 
 static struct {                       /* 0B21 state: DS:7C0C table, 7C0A count, 7C08 first-selectable flag, 7C06 title flag */
@@ -135,13 +134,6 @@ static void menu_setup(int id)        /* 06B8:0B21 */
     }
     case MENU_ASPECT:    set_items(k_aspect, 3, 1, 1); break;
     case MENU_FRAMERATE: set_items(k_frate, 6, 1, 1); break;
-    case MENU_PAD: {                  /* controller remap: one line per action with its button */
-        static char l[PAD_ACTIONS][32]; static const char *it[PAD_ACTIONS + 2];
-        it[0] = "Select an action to remap";
-        for (int a = 0; a < PAD_ACTIONS; a++) { snprintf(l[a], sizeof l[a], "%s - %s", k_padact[a], config_pad_name(g_port.pad[a])); it[a + 1] = l[a]; }
-        it[PAD_ACTIONS + 1] = "Reset to defaults";
-        set_items(it, PAD_ACTIONS + 2, 1, 1); break;
-    }
     case MENU_EPISODE: set_items(k_ep, 5, 1, 1); break;
     case MENU_LEVEL:   set_items(k_level, 10, 1, 1); break;
     case MENU_SKILL:   set_items(k_skill, 4, 1, 1); break;
@@ -577,55 +569,6 @@ void frontend_save(void)
     settings_save(); menu_fade_out();
 }
 
-/* ---------------------------------------------------------------- define keys (06B8:17DA, 10AC) */
-static void key_hint(void)
-{
-    static const char h[] = "Press LETTER to select - ESC to exit";
-    if (g_front.img) g_front.img(9, 0, 0xB8);
-    shadowed((320 - text_width(h)) / 2, 0xBC, 4, h);
-    if (g_front.img) g_front.img(10, 0, 0);
-}
-static void pick_key(int action)                  /* 10AC: choose a key for one action from the 18 listed keys */
-{
-    static const char *an[8] = { "Left", "Right", "Jump", "Fire", "Up", "Down", "Scroll up", "Scroll down" };
-    char b[48]; video_pal_set_black(); video_set_draw_page(0); video_clear_draw_page(); video_show_page_now(0);
-    snprintf(b, sizeof b, "Select new key for: %s", an[action]); centred(0x48, 5, b);
-    key_hint();
-    for (int i = 0; i < 18; i++) {
-        int col = i / 6, x = col == 0 ? 0x1B : col == 1 ? 0x7D : 0xC8, y = 0x5C + (i % 6) * 10;
-        char l[2] = { (char)('A' + i), 0 };
-        text_draw_grad(x, y, 4, l); text_draw_grad(x + 10, y, 2, "-"); text_draw_grad(x + 0x14, y, 2, g_key_name[i]);
-    }
-    video_pal_fade_in(0x14);
-    if (g_front.flush_keys) g_front.flush_keys();
-    for (;;) {
-        int k = key_wait();
-        if (!k || k == FK_ESC) break;
-        if (k >= 'A' && k <= 'R') { g_binding[action] = (uint8_t)(k - 'A'); break; }
-    }
-    menu_fade_out();
-}
-static void define_keys(void)
-{
-    static const char *an[8] = { "Left", "Right", "Jump", "Fire", "Up", "Down", "Scroll up", "Scroll down" };
-    for (;;) {
-        video_pal_set_black(); video_set_draw_page(0); video_clear_draw_page(); video_show_page_now(0);
-        centred(0x3E, 5, "Select a key to define");
-        key_hint();
-        for (int i = 0; i < 8; i++) {
-            int y = 0x5C + i * 10; char l[2] = { (char)('A' + i), 0 };
-            text_draw_grad(0x46, y, 4, l); text_draw_grad(0x50, y, 2, "-"); text_draw_grad(0x5A, y, 2, an[i]);
-            const char *kn = g_key_name[g_binding[i] % 18]; text_draw_grad(0xFA - text_width(kn), y, 3, kn);
-        }
-        video_pal_fade_in(0x14);
-        if (g_front.flush_keys) g_front.flush_keys();
-        int k = key_wait();
-        if (!k || k == FK_ESC) { menu_fade_out(); return; }
-        menu_fade_out();
-        if (k >= 'A' && k <= 'H') pick_key(k - 'A');
-    }
-}
-
 /* ---------------------------------------------------------------- quit confirmation (06B8:2EE1, 0E52, 0FBC) */
 static int confirm_quit(void)
 {
@@ -687,51 +630,98 @@ static void choose_music(void)
 static void port_apply(void) { if (g_front.port_apply) g_front.port_apply(); }
 
 /* port: controller remap - the Define Keys screens, but picked with the menu marker so a controller can work it */
-static void pad_prompt(int action)
+/* ---------------------------------------------------------------- Keyboard Remap / Controller Remap (port; replaces 06B8:17DA "Define keys")
+ * A grid: one row per action, two binding columns.  Up / Down pick the action, Left / Right the column; Enter (A) waits for
+ * the new key or button in place, Backspace / Delete (Y) clears.  A binding that was elsewhere moves (config_bind_*). */
+#define REMAP_Y0 0x48
+#define REMAP_COL0 0x1C
+static const int k_remap_col[BIND_SLOTS] = { 0x70, 0xCC };
+static const char *remap_name(int pad, int a, int sl)
 {
-    char b[48];
-    video_pal_set_black(); video_set_draw_page(0); video_clear_draw_page(); video_show_page_now(0);
-    snprintf(b, sizeof b, "Press a button for: %s", k_padact[action]); centred(0x48, 5, b);
-    snprintf(b, sizeof b, "Currently %s", config_pad_name(g_port.pad[action])); centred(0x5C, 3, b);
-    centred(0x70, 2, "D-pad, stick and Menu stay fixed");
-    {
-        static const char h[] = "Press MENU or ESC to cancel";
-        if (g_front.img) g_front.img(9, 0, 0xB8);
-        shadowed((320 - text_width(h)) / 2, 0xBC, 4, h);
-        if (g_front.img) g_front.img(10, 0, 0);
+    if (pad) return g_port.pad[a][sl] >= 0 ? config_pad_name(g_port.pad[a][sl]) : "-";
+    return g_port.key[a][sl] ? (g_front.key_name ? g_front.key_name(g_port.key[a][sl]) : "?") : "-";
+}
+static void remap_draw(int pad, int row, int col, int capturing)
+{
+    video_set_draw_page(0); video_clear_draw_page(); video_show_page_now(0);
+    char b[64];
+    if (capturing) {
+        snprintf(b, sizeof b, "Press a %s for: %s", pad ? "button" : "key", g_bind_name[row]); centred(0x30, 5, b);
+        centred(0x3C, 2, pad ? "Menu and Guide can't be used" : "Letters P M S V C lose their game shortcut");
+    } else {
+        centred(0x30, 5, pad ? "Controller Remap" : "Keyboard Remap");
+        centred(0x3C, 2, pad ? "Menu and Guide stay fixed" : "Esc and F1-F12 stay fixed");
     }
-    video_pal_fade_in(0x14);
+    for (int a = 0; a < BIND_ACTIONS; a++) {
+        int y = REMAP_Y0 + a * 10;
+        text_draw_grad(REMAP_COL0, y, a == row ? 4 : 3, g_bind_name[a]);
+        for (int sl = 0; sl < BIND_SLOTS; sl++) {
+            int sel = a == row && sl == col;
+            const char *t = sel && capturing ? "..." : remap_name(pad, a, sl);
+            text_draw_grad(k_remap_col[sl], y, sel ? 4 : 2, t);
+        }
+    }
+    text_draw_grad(REMAP_COL0, REMAP_Y0 + BIND_ACTIONS * 10 + 4, row == BIND_ACTIONS ? 4 : 3, "Reset to defaults");
+    if (g_front.img) g_front.img(9, 0, 0xB8);
+    {
+        const char *h = capturing ? (pad ? "Press MENU or ESC to cancel" : "Press ESC to cancel")
+                                  : "ENTER/A change - DEL/Y clear - ESC/B exit";
+        shadowed((320 - text_width(h)) / 2, 0xBC, 4, h);
+    }
+    if (g_front.img) g_front.img(10, 0, 0);
+}
+static int remap_row_y(int row) { return REMAP_Y0 + row * 10 + (row == BIND_ACTIONS ? 4 : 0) - 4; }
+static void remap_capture(int pad, int a, int sl)
+{
+    remap_draw(pad, a, sl, 1);
     if (g_front.flush_keys) g_front.flush_keys();
     for (;;) {
         if (g_front.quit && g_front.quit()) break;
-        int k = g_front.key ? g_front.key() : 0;
-        if (k == FK_ESC) break;
-        int btn = g_front.pad_button ? g_front.pad_button() : -1;
-        if (btn == 6) break;                                  /* Menu (Start) */
-        if (btn >= 0 && config_pad_assignable(btn)) {
-            for (int a = 0; a < PAD_ACTIONS; a++)             /* a button does one thing: swap with its old action */
-                if (a != action && g_port.pad[a] == btn) g_port.pad[a] = g_port.pad[action];
-            g_port.pad[action] = btn;
-            port_apply();
-            break;
+        if (pad) {
+            int c = g_front.pad_button ? g_front.pad_button() : -1;
+            if (c == 6) break;                                            /* Menu: cancel */
+            if (c >= 0 && config_pad_assignable(c)) { config_bind_pad(a, sl, c); port_apply(); break; }
+            if (c < 0 && g_front.key && g_front.key() == FK_ESC) break;    /* Esc on the keyboard */
+        } else {
+            int sc = g_front.key_capture ? g_front.key_capture() : -1;
+            if (sc == 41 /* SDL_SCANCODE_ESCAPE */) break;
+            if (sc >= 0 && config_key_assignable(sc)) { config_bind_key(a, sl, sc); port_apply(); break; }
+            if (sc < 0 && g_front.key && g_front.key() == FK_ESC) break;   /* Menu / B on a controller */
         }
+        bar_draw(remap_row_y(a));
+        if (g_front.pace) g_front.pace();
+    }
+    if (g_front.flush_keys) g_front.flush_keys();
+}
+static void remap_screen(int pad)
+{
+    int row = 0, col = 0;
+    video_pal_set_black();
+    remap_draw(pad, row, col, 0);
+    s_barx = 1;
+    video_pal_fade_in(0x14);
+    if (g_front.flush_keys) g_front.flush_keys();
+    for (;;) {
+        if (g_front.quit && g_front.quit()) return;
+        int k = g_front.key ? g_front.key() : 0, redraw = 0;
+        if (k == FK_ESC) break;
+        if (k == FK_UP)    { bar_clear(remap_row_y(row)); row = row ? row - 1 : BIND_ACTIONS; redraw = 1; }
+        if (k == FK_DOWN)  { bar_clear(remap_row_y(row)); row = row < BIND_ACTIONS ? row + 1 : 0; redraw = 1; }
+        if ((k == FK_LEFT || k == FK_RIGHT) && row < BIND_ACTIONS) { col ^= 1; redraw = 1; }
+        if (k == FK_CLEAR && row < BIND_ACTIONS) {
+            if (pad) config_bind_pad(row, col, PAD_NONE); else config_bind_key(row, col, 0);
+            port_apply(); redraw = 1;
+        }
+        if (k == FK_ENTER) {
+            if (row < BIND_ACTIONS) remap_capture(pad, row, col);
+            else { if (pad) config_default_pad(); else config_default_keys(); port_apply(); }
+            redraw = 1;
+        }
+        if (redraw) remap_draw(pad, row, col, 0);
+        bar_draw(remap_row_y(row));
         if (g_front.pace) g_front.pace();
     }
     menu_fade_out();
-    if (g_front.flush_keys) g_front.flush_keys();
-}
-static void pad_remap(void)
-{
-    for (;;) {
-        int r = menu_show(MENU_PAD, 0);
-        if (r == 0xFF || (g_front.quit && g_front.quit())) return;
-        if (r < PAD_ACTIONS) pad_prompt(r);
-        else {                                                /* reset to defaults (the other settings stay) */
-            PortSettings keep = g_port; config_defaults();
-            g_port.hud_off = keep.hud_off; g_port.wide = keep.wide; g_port.framerate = keep.framerate;
-            port_apply();
-        }
-    }
 }
 
 static void options_loop(void)
@@ -752,8 +742,8 @@ static void options_loop(void)
         case 5: if ((c = choose(MENU_ASPECT, g_port.wide)) >= 0) { g_port.wide = c; port_apply(); } break;
         case 6: if ((c = choose(MENU_FRAMERATE, g_port.framerate)) >= 0) { g_port.framerate = c; port_apply(); } break;
         case 7: if ((c = choose(MENU_SPEED, g_game_speed)) >= 0) g_game_speed = (int16_t)c; break;
-        case 8: define_keys(); break;
-        case 9: pad_remap(); break;
+        case 8: remap_screen(0); break;
+        case 9: remap_screen(1); break;
         default: settings_save(); return;
         }
         if (g_front.quit && g_front.quit()) return;

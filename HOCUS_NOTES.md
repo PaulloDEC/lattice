@@ -930,3 +930,32 @@ run-ahead 0 vs 1 identical (E2L4, wide).
 * **Tests.**  `diff_music.py` picks one of 4 devices per song; for GM the original runs with the MPU table and its byte
   primitive logged: 400 songs, 0 mismatches.  `diff_music_real.py`: 12 songs x 4 devices identical.  The test library
   now also builds `gm.c`.
+
+## 54. Keyboard Remap / Controller Remap rebuilt (any key, two per action)
+
+* **Why.**  The original "Define keys" (06B8:17DA / 10AC) picks from 18 listed keys by letter (its ISR only watches those;
+  letters are hotkeys), one key per action, no pause; the port's Controller Remap fixed the D-pad / stick / Menu and had
+  hidden extras (B fire, LT jump, RT fire while unassigned).  Players found both limiting.
+* **Model (`config.[ch]`).**  Nine actions for both devices - Left, Right, Up, Down, Jump, Fire, Look up, Look down,
+  Pause (`BIND_*`) - two slots each: `g_port.key[a][2]` (SDL scancodes) and `g_port.pad[a][2]` (buttons 0..20, LT 40,
+  RT 41, stick directions 42..49).  Assignable: any key but Esc and F1..F24; any pad input but Menu and Guide.
+  `config_bind_*` moves a binding (it leaves any other slot).  HOCUS.CFG: `key_jump=Left Ctrl`, `key_jump2=Space`,
+  `pad_jump=A`, `pad_jump2=LT` (`-` = none); the old `pad_jump=..` lines read as slot 1.  Defaults: the original keys +
+  P for pause; pad D-pad + left stick, A + LT jump, X + RT fire, LB + right stick up / RB + right stick down, View pause.
+* **Routing (`main_sdl.c`).**  Every action drives a virtual button that sends the game its *wire* key: the original's
+  default binding for that action (P for pause); HOCUS.SAV's binding table stays the defaults.  A key bound to an action
+  never reaches the game as itself, and an unbound wire key is dropped, so a moved binding leaves nothing behind (Ctrl
+  after Jump moved to Space) and a bound letter overrides the game's hotkey on it (P M S V C).  Esc, F-keys, text entry
+  and menu navigation are unchanged.  Menus keep fixed navigation (arrows / D-pad / left stick, Enter / A, Esc / B /
+  Menu, PgUp / PgDn / LB / RB) and Backspace / Delete / Y = clear on the remap screens (`FK_CLEAR`).
+* **Fixed on the way.**  main re-ran `input_init_defaults()` after `settings_load`, so the DOS key setup from HOCUS.SAV
+  never survived a restart; on the first run without `key_` lines it is now carried into the new bindings once.  The
+  controller's "Reset to defaults" no longer resets Display size / Music (each screen resets only its own bindings).
+* **Screen (`frontend.c` `remap_screen`).**  A grid: action names, two binding columns; Up / Down pick the row, Left /
+  Right the column, Enter / A captures in place ("..." + a hint line), Backspace / Delete / Y clears, "Reset to defaults"
+  last.  Key names are SDL's (arrows as the original's "Left arrow"...), limited to the font's 0x20..0x7A.
+* **Tests.**  `--kev "+Right,.,-Right"` (real SDL key events through the whole path), `--key-map jump2=Space`,
+  `--pad-map` (all nine actions).  Checked in E1L2 at fixed frames: Right arrow = D as Right's 2nd key; Right arrow
+  after Right moved to D = no input; Ctrl jumps, Ctrl after Jump moved to Space = no input, Space = the same jump; S as
+  2nd fire = Alt; pad A jumps, B with jump=B = the same jump, A then = nothing; RT = X.  Remap screen: capture, move
+  (Ctrl to Fire empties Jump), clear; HOCUS.CFG round trip and an old-format file.
