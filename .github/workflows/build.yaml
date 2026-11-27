@@ -11,19 +11,28 @@ on:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+    # Build inside Ubuntu 22.04: a program needs at least the glibc version it was built with, so an older
+    # build system lets it run on older Linux too (Ubuntu / Pop!_OS 22.04 and newer, Steam Deck).
+    container: ubuntu:22.04
 
     steps:
+      - name: Install build tools and SDL2
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y build-essential libsdl2-dev
+
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Install build tools and SDL2
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libsdl2-dev
 
       - name: Compile hocus
         working-directory: port
         run: make -j$(nproc)
+
+      - name: Show the newest glibc version the program needs
+        working-directory: port
+        run: objdump -T hocus | grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n -u | tail -1
 
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4
